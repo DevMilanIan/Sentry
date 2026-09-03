@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "options-sentinel"
+version = "0.1.0"
+description = "Local-first, safety-gated options surveillance and trading system"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Proprietary"}
+dependencies = [
+  "alembic>=1.14,<2",
+  "asyncpg>=0.30,<1",
+  "defusedxml>=0.7.1,<1",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "mcp==2.1.1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "PyYAML>=6.0,<7",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+  "structlog>=24.4,<26",
+  "tzdata>=2025.2",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1",
+  "types-defusedxml>=0.7.0.20250822",
+  "types-pywin32>=311.0.0.20250723",
+  "types-PyYAML>=6.0.12.20250915",
+]
+
+[project.scripts]
+options-sentinel = "app.main:cli"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: requires local services",
+  "broker_auth: requires user-owned Robinhood authorization",
+  "ollama: requires a running local Ollama server",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/api/dashboard.py" = ["E501"]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]

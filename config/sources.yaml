@@ -1,0 +1,19 @@
+version: sources-v1
+sec_user_agent: OptionsSentinel local-research contact-required@example.invalid
+poll_seconds: 900
+official_sources:
+  - id: white_house
+    url: https://www.whitehouse.gov/briefing-room/feed/
+  - id: defense
+    url: https://www.defense.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=400&Site=945&max=20
+  - id: energy
+    url: https://www.energy.gov/rss.xml
+  - id: commerce
+    url: https://www.commerce.gov/rss.xml
+  - id: sec
+    url: https://www.sec.gov/news/pressreleases.rss
+  - id: federal_reserve
+    url: https://www.federalreserve.gov/feeds/press_all.xml
+  - id: treasury
+    url: https://home.treasury.gov/news/press-releases/feed
+

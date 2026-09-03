@@ -1,0 +1,196 @@
+{
+  "version": "fixture-v1",
+  "provider": "offline-replay",
+  "capability_version": "replay-v1",
+  "records": [
+    {
+      "sequence": 0,
+      "kind": "equity_quote",
+      "observed_at": "2026-01-05T14:30:00Z",
+      "effective_at": "2026-01-05T14:30:00Z",
+      "payload": {
+        "snapshot_id": "00000000-0000-4000-8000-000000000001",
+        "symbol": "ACME",
+        "bid": "99.90",
+        "ask": "100.10",
+        "last": "100.00",
+        "volume": 100000,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:30:00Z",
+          "effective_at": "2026-01-05T14:30:00Z",
+          "source_id": "fixture:equity:acme:0"
+        }
+      }
+    },
+    {
+      "sequence": 1,
+      "kind": "option_quote",
+      "observed_at": "2026-01-05T14:30:01Z",
+      "effective_at": "2026-01-05T14:30:01Z",
+      "payload": {
+        "snapshot_id": "00000000-0000-4000-8000-000000000011",
+        "contract": {
+          "instrument_id": "ACME-20260123-C-102",
+          "symbol": "ACME",
+          "option_type": "call",
+          "strike": "102",
+          "expiration": "2026-01-23",
+          "multiplier": 100
+        },
+        "bid": "0.16",
+        "ask": "0.20",
+        "last": "0.18",
+        "mark": "0.18",
+        "volume": 250,
+        "open_interest": 1200,
+        "implied_volatility": "0.42",
+        "delta": "0.41",
+        "bid_size": 20,
+        "ask_size": 25,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:30:01Z",
+          "effective_at": "2026-01-05T14:30:01Z",
+          "source_id": "fixture:option:acme:c102:0"
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "kind": "option_quote",
+      "observed_at": "2026-01-05T14:30:01Z",
+      "effective_at": "2026-01-05T14:30:01Z",
+      "payload": {
+        "snapshot_id": "00000000-0000-4000-8000-000000000012",
+        "contract": {
+          "instrument_id": "ACME-20260123-C-110",
+          "symbol": "ACME",
+          "option_type": "call",
+          "strike": "110",
+          "expiration": "2026-01-23",
+          "multiplier": 100
+        },
+        "bid": "0.01",
+        "ask": "0.20",
+        "last": "0.05",
+        "mark": "0.105",
+        "volume": 1,
+        "open_interest": 4,
+        "implied_volatility": "1.20",
+        "delta": "0.08",
+        "bid_size": 1,
+        "ask_size": 2,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:30:01Z",
+          "effective_at": "2026-01-05T14:30:01Z",
+          "source_id": "fixture:option:acme:c110:0"
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "kind": "option_quote",
+      "observed_at": "2026-01-05T14:30:01Z",
+      "effective_at": "2026-01-05T14:30:01Z",
+      "payload": {
+        "snapshot_id": "00000000-0000-4000-8000-000000000013",
+        "contract": {
+          "instrument_id": "ACME-20260123-P-98",
+          "symbol": "ACME",
+          "option_type": "put",
+          "strike": "98",
+          "expiration": "2026-01-23",
+          "multiplier": 100
+        },
+        "bid": "0.14",
+        "ask": "0.19",
+        "last": "0.16",
+        "mark": "0.165",
+        "volume": 180,
+        "open_interest": 900,
+        "implied_volatility": "0.44",
+        "delta": "-0.38",
+        "bid_size": 12,
+        "ask_size": 16,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:30:01Z",
+          "effective_at": "2026-01-05T14:30:01Z",
+          "source_id": "fixture:option:acme:p98:0"
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "kind": "bar",
+      "observed_at": "2026-01-05T14:35:00Z",
+      "effective_at": "2026-01-05T14:35:00Z",
+      "payload": {
+        "symbol": "ACME",
+        "timeframe": "5m",
+        "starts_at": "2026-01-05T14:30:00Z",
+        "ends_at": "2026-01-05T14:35:00Z",
+        "open": "100.00",
+        "high": "101.10",
+        "low": "99.95",
+        "close": "100.90",
+        "volume": 65000,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:35:00Z",
+          "effective_at": "2026-01-05T14:35:00Z",
+          "source_id": "fixture:bar:acme:1435"
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "kind": "equity_quote",
+      "observed_at": "2026-01-05T14:35:00Z",
+      "effective_at": "2026-01-05T14:35:00Z",
+      "payload": {
+        "snapshot_id": "00000000-0000-4000-8000-000000000002",
+        "symbol": "ACME",
+        "bid": "100.85",
+        "ask": "100.95",
+        "last": "100.90",
+        "volume": 165000,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:35:00Z",
+          "effective_at": "2026-01-05T14:35:00Z",
+          "source_id": "fixture:equity:acme:1"
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "kind": "equity_quote",
+      "observed_at": "2026-01-05T14:40:00Z",
+      "effective_at": "2026-01-05T14:40:00Z",
+      "payload": {
+        "snapshot_id": "00000000-0000-4000-8000-000000000003",
+        "symbol": "ACME",
+        "bid": "102.90",
+        "ask": "103.10",
+        "last": "103.00",
+        "volume": 250000,
+        "metadata": {
+          "provider": "offline-replay",
+          "capability_version": "replay-v1",
+          "observed_at": "2026-01-05T14:40:00Z",
+          "effective_at": "2026-01-05T14:40:00Z",
+          "source_id": "fixture:equity:acme:2"
+        }
+      }
+    }
+  ]
+}

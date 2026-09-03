@@ -1,0 +1,12 @@
+version: live-v1-locked
+execution_environment: LIVE
+database_schema: live
+runtime_directory: var/live
+idempotency_namespace: live
+external_write_authority: false
+requires_authorization_file: true
+requires_qualified_account_fingerprint: true
+requires_zero_open_gates: true
+startup_safety_state: HALTED
+decision_policy: LIVE_CONSERVATIVE
+

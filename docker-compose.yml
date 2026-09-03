@@ -1,0 +1,42 @@
+name: options-sentinel
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sentinel
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+
+  trading-app:
+    build: .
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      SENTRY_DATABASE_URL: postgresql+asyncpg://sentinel:${POSTGRES_PASSWORD:-local-development-only}@postgres:5432/sentinel
+    volumes:
+      - ./config:/app/config:ro
+      - ./var:/app/var
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks: [internal]
+
+networks:
+  internal:
+    internal: false
+
+volumes:
+  postgres_data:
+

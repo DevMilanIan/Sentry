@@ -1,0 +1,10 @@
+version: broker-shadow-v1-locked
+execution_environment: DEMO
+demo_backend: BROKER_SHADOW
+database_schema: demo
+runtime_directory: var/demo/broker_shadow
+idempotency_namespace: demo-broker-shadow
+initial_cash: "25.00"
+fill_model: conservative-v1
+fill_seed: 1729
+external_write_authority: false

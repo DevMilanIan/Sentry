@@ -1,0 +1,14 @@
+version: model-v1
+provider: ollama
+base_url: http://localhost:11434
+model: qwen3.5:9b
+normal_timeout_seconds: 60
+deep_timeout_seconds: 180
+max_repair_attempts: 1
+context_token_limit: 4096
+temperature: 0.1
+judge_temperature: 0
+thinking_enabled: false
+max_output_tokens: 1024
+deterministic_seed: 1729
+cloud_fallback: false

@@ -1,0 +1,32 @@
+version: risk-v1
+portfolio:
+  starting_capital_reference: "25.00"
+funding:
+  expected_weekly_min: "5.00"
+  expected_weekly_max: "20.00"
+strategy:
+  allowed_instruments: [long_call, long_put]
+  maximum_contracts_per_position: 1
+risk:
+  max_new_trade_premium_dollars: "10.00"
+  max_total_open_option_risk_dollars: "10.00"
+  max_open_positions: 1
+  max_new_entries_per_day: 1
+  daily_new_entries_enabled: true
+liquidity:
+  require_nonzero_bid: true
+  starting_minimum_open_interest: 50
+  starting_minimum_option_volume: 10
+  starting_maximum_bid_ask_percent: "30"
+execution:
+  limit_orders_only: true
+  market_orders_allowed: false
+  pretrade_review_required: true
+  human_entry_approval_required: true
+prohibited:
+  naked_options: true
+  short_options: true
+  borrowed_margin: true
+  martingale: true
+  automatic_risk_limit_changes: true
+

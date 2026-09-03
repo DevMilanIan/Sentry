@@ -1,0 +1,76 @@
+# Development log
+
+## 2026-09-02 — Repository bootstrap
+
+- Received and reviewed the implementation specification.
+- Confirmed the workspace was empty and initialized a new Git repository.
+- Established safe-default configuration: `DEMO/OFFLINE_SIM + RESEARCH`, no external-write
+  authority, localhost-only dashboard, and environment-isolated persistence names.
+- Began read-only host audit and revalidation of dynamic platform facts.
+- External blockers expected later: user-owned Robinhood OAuth, five real regular-market
+  broker-shadow sessions, subsequent user funding/capital ceiling, and explicit Live mode
+  authorization.
+
+## 2026-09-02 — Phase 0 audit and platform revalidation
+
+- Hardware is suitable: Windows 11, Ryzen 5 5600X, 64 GiB RAM, RTX 3060 Ti 8 GiB, ample NVMe.
+- WSL2/Virtual Machine Platform are disabled; Docker and Ollama are absent.
+- Found a safety-critical host clock offset of approximately -5.85 seconds with Windows Time
+  stopped/manual. Timestamp-sensitive operation remains blocked pending remediation.
+- Revalidated Robinhood, MCP SDK v2.1.1, Ollama/Qwen, and Docker/WSL facts against primary sources.
+- Updated architecture to default-deny all unknown/mutating MCP tools and pin SDK v2.1.1.
+- Created a CPython 3.12 virtual environment and installed development dependencies.
+
+## 2026-09-03 — Core implementation and local verification
+
+- Continued the September 2 bootstrap without treating the repository scaffold as completion.
+  Implemented typed configuration/domain models, injected clocks, deterministic market replay,
+  candidate/contract selection, hard risk checks, bounded local reasoning, simulated and
+  broker-shadow adapters, exact execution intents, the write firewall, position monitoring,
+  qualification evaluation, and localhost control/reporting modules.
+- Added focused reporting, notification, and learning tests. The 70-case focused run passed,
+  with 100% line coverage of those three modules at that run. The tests exposed and drove fixes
+  for invalid environment/backend labels, non-UTC report timestamps, unknown-uptime formatting,
+  and prohibition changes hidden in alternate or nested learning-proposal paths.
+- Retained the local model benchmark artifact
+  `benchmarks/results/qwen35_2026-09-03.json`: the recorded 100-case `qwen3.5:9b` run reports
+  100% valid JSON, 99% grounding, and a 12.581-second p95 latency. This is bounded fixture evidence,
+  not a profitability result or authorization to trade.
+
+## 2026-09-03 — Durable execution journal and restart recovery
+
+- Added `app/execution/postgres_store.py`. `PostgresExecutionStore(repository, clock)` implements
+  the execution-store contract and typed proposal, approval, risk, review, intent, order, fill,
+  position, transition, and reconciliation retrieval. It contains no broker transport authority.
+- Added environment-and-namespace-scoped `find_payload`/`list_payloads` queries with keyset
+  pagination. Startup scans fail closed if the configured bound is exceeded instead of accepting
+  silently truncated order evidence.
+- Added migration `0002_durable_execution`: audit-table `append_sequence` identities establish
+  ingestion order independently of replay timestamps, and filtered unique indexes defend immutable
+  execution identities. Identical retry content is a no-op; changed identity content is rejected.
+  Existing duplicates are not deleted automatically. Legacy equal-timestamp history cannot gain
+  chronology that was never recorded and needs reconciliation before reliance on migrated state.
+- Added serializable `LedgerSnapshot` integration and the finite `OfflineReplaySession` runtime.
+  `app/demo/runtime.py` persists a checksummed ledger-plus-replay-checkpoint envelope in
+  `shadow_ledger_events`, verifies its binding on restore, and correlates restored orders with
+  durable order and command intents. A crash gap is reconciled, not used to resubmit an order.
+- Verification for the new store/repository work: 29 focused unit/contract cases passed. The
+  combined selection including execution-service and in-memory runtime recovery/guard tests
+  passed 38 cases. Ruff and strict mypy passed for the six owned production/migration/test files.
+  SQL was compiled and migration statements inspected with mocks; this is not a real PostgreSQL
+  migration, concurrent-writer, backup/restore, or process-kill integration test.
+
+## Remaining setup and qualification work
+
+- WSL2/Ubuntu and Docker provisioning remain open; no unattended WSL/container deployment has
+  been demonstrated. Historical host-clock findings remain in `MACHINE_AUDIT.md`; fresh clock and
+  startup evidence are required before timestamp-sensitive broker qualification.
+- Apply and test the Alembic chain against real PostgreSQL, including uniqueness races,
+  failed commits, crash/restart, and backup/restore. Test the migration against retained data
+  before upgrading any non-disposable environment.
+- Continue end-to-end runtime and fault verification. Finite historical replay, passing unit
+  tests, and local model benchmarks do not constitute five authenticated regular-market sessions.
+- No broker authentication, funding request, real order submission, or Live activation has been
+  performed by this work. Same-account broker-shadow qualification, user-owned funding/capital
+  decisions, and explicit Live activation remain staged gates. V1/full-project completion is not
+  claimed.

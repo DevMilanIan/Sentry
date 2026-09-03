@@ -1,0 +1,67 @@
+{
+  "version": "reasoning-benchmark-v1",
+  "groups": [
+    {
+      "id_prefix": "catalyst",
+      "count": 20,
+      "task": "catalyst_interpretation",
+      "role": "situation",
+      "fact_template": "Primary filing verifies an incremental signed program award for TEST{index} valued at 30 percent of trailing revenue.",
+      "counterfact_template": "No offsetting dilution, termination risk, or negative earnings revision is identified for TEST{index}.",
+      "expected_direction": "bullish"
+    },
+    {
+      "id_prefix": "bull",
+      "count": 10,
+      "task": "bull_bear",
+      "role": "bull",
+      "fact_template": "TEST{index} received a verified award with near-term revenue relevance.",
+      "counterfact_template": "The initial price response for TEST{index} remains modest."
+    },
+    {
+      "id_prefix": "bear",
+      "count": 10,
+      "task": "bull_bear",
+      "role": "bear",
+      "fact_template": "TEST{index} rose on volume after a verified announcement.",
+      "counterfact_template": "The option spread and implied volatility are elevated."
+    },
+    {
+      "id_prefix": "option_critique",
+      "count": 20,
+      "task": "option_trade_critique",
+      "role": "skeptic",
+      "fact_template": "The underlying thesis horizon is ten sessions.",
+      "counterfact_template": "The candidate expires in two sessions with a wide spread.",
+      "must_flag_conflict": false
+    },
+    {
+      "id_prefix": "judge",
+      "count": 20,
+      "task": "structured_judge",
+      "role": "judge",
+      "fact_template": "TEST{index} has a verified catalyst and confirming volume.",
+      "counterfact_template": "The ranked contract passes deterministic minimums.",
+      "expected_decision": "PASS"
+    },
+    {
+      "id_prefix": "conflict",
+      "count": 10,
+      "task": "conflicting_sources",
+      "role": "skeptic",
+      "fact_template": "Primary source A says the TEST{index} award is final.",
+      "counterfact_template": "Primary source B says the same award remains under protest.",
+      "must_flag_conflict": true
+    },
+    {
+      "id_prefix": "insufficient",
+      "count": 10,
+      "task": "insufficient_information",
+      "role": "situation",
+      "fact_template": "TEST{index} moved, but no verified catalyst is available.",
+      "counterfact_template": "Volume and source provenance are unavailable.",
+      "expected_direction": "none",
+      "must_abstain": true
+    }
+  ]
+}

@@ -1,0 +1,525 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from app.api.dashboard import RuntimeView
+from app.clock.base import Clock, VirtualClock
+from app.config import AppConfig, RuntimeBinding
+from app.controller import master as master_module
+from app.controller.master import InstanceLock, MasterController, PeriodicJob
+from app.domain.enums import (
+    DemoBackend,
+    ExecutionEnvironment,
+    RuntimeSafetyState,
+    TradingMode,
+)
+from app.observability.metrics import MetricsRegistry
+from app.safety.runtime_state import SafetyController, SafetyEvidence
+
+
+async def _true() -> bool:
+    return True
+
+
+def _app_config(
+    tmp_path: Path, *, environment_execution_disabled: bool = False
+) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "version": "controller-tests",
+            "execution_environment": "DEMO",
+            "demo_backend": "OFFLINE_SIM",
+            "trading_mode": "RESEARCH",
+            "database": {"url": "postgresql+asyncpg://unused"},
+            "runtime": {
+                "instance_lock_dir": tmp_path / "locks",
+                "disabled_file": tmp_path / "TRADING_DISABLED",
+                "environment_execution_disabled": environment_execution_disabled,
+                "startup_health_window_seconds": 0,
+            },
+            "dashboard": {},
+            "sentinel": {},
+        }
+    )
+
+
+def _binding(tmp_path: Path) -> RuntimeBinding:
+    return RuntimeBinding(
+        environment=ExecutionEnvironment.DEMO,
+        demo_backend=DemoBackend.OFFLINE_SIM,
+        database_schema="demo",
+        runtime_directory=tmp_path,
+        idempotency_namespace="controller-tests",
+        external_write_authority=False,
+        config_version="controller-tests",
+    )
+
+
+def _healthy_evidence() -> SafetyEvidence:
+    return SafetyEvidence(True, True, True, True, True, True, True, True)
+
+
+def _normal_view(binding: RuntimeBinding, clock: Clock) -> RuntimeView:
+    safety = SafetyController(clock, timedelta(0))
+    safety.observe(_healthy_evidence())
+    safety.observe(_healthy_evidence())
+    assert safety.state is RuntimeSafetyState.NORMAL
+    return RuntimeView(
+        binding=binding,
+        trading_mode=TradingMode.RESEARCH,
+        safety=safety,
+        broker_connected=True,
+        database_healthy=True,
+        market_data_fresh=True,
+        reconciled=True,
+        execution_service_healthy=True,
+        unresolved_submission=False,
+    )
+
+
+def _controller(
+    tmp_path: Path,
+    clock: Clock,
+    *,
+    repository_health: Callable[[], Awaitable[bool]] = _true,
+    broker_health: Callable[[], Awaitable[bool]] = _true,
+    reconcile: Callable[[], Awaitable[bool]] = _true,
+    execution_health: Callable[[], Awaitable[bool]] | None = _true,
+    environment_execution_disabled: bool = False,
+) -> tuple[MasterController, RuntimeView, MetricsRegistry]:
+    view = _normal_view(_binding(tmp_path), clock)
+    metrics = MetricsRegistry()
+    controller = MasterController(
+        _app_config(
+            tmp_path,
+            environment_execution_disabled=environment_execution_disabled,
+        ),
+        view,
+        clock,
+        metrics,
+        repository_health=repository_health,
+        broker_health=broker_health,
+        reconcile=reconcile,
+        execution_health=execution_health,
+    )
+    return controller, view, metrics
+
+
+def test_instance_lock_is_atomic_and_only_owner_releases(tmp_path: Path) -> None:
+    path = tmp_path / "locks" / "demo.lock"
+    owner = InstanceLock(path)
+    contender = InstanceLock(path)
+
+    owner.acquire()
+    assert path.exists()
+
+    with pytest.raises(RuntimeError, match="runtime lock already exists"):
+        contender.acquire()
+    contender.release()
+    assert path.exists()
+
+    owner.release()
+    with InstanceLock(path):
+        pass
+
+
+def test_instance_lock_context_releases_after_failure(tmp_path: Path) -> None:
+    path = tmp_path / "demo.lock"
+
+    with pytest.raises(LookupError):
+        with InstanceLock(path):
+            assert path.exists()
+            raise LookupError("startup failed")
+
+    with InstanceLock(path):
+        pass
+
+
+@pytest.mark.parametrize("stale_contents", ["999999", ""])
+def test_instance_lock_can_recover_unlocked_stale_file(
+    tmp_path: Path, stale_contents: str
+) -> None:
+    path = tmp_path / "demo.lock"
+    path.write_text(stale_contents, encoding="ascii")
+
+    with InstanceLock(path):
+        contender = InstanceLock(path)
+        with pytest.raises(RuntimeError, match="runtime lock already exists"):
+            contender.acquire()
+
+    with InstanceLock(path):
+        pass
+
+
+def test_instance_lock_release_cannot_remove_successor_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "demo.lock"
+    owner = InstanceLock(path)
+    successor = InstanceLock(path)
+    contender = InstanceLock(path)
+    original_unlock = master_module._unlock_descriptor
+
+    owner.acquire()
+
+    def unlock_then_handoff(descriptor: int) -> None:
+        original_unlock(descriptor)
+        successor.acquire()
+
+    monkeypatch.setattr(master_module, "_unlock_descriptor", unlock_then_handoff)
+    try:
+        owner.release()
+        with pytest.raises(RuntimeError, match="runtime lock already exists"):
+            contender.acquire()
+    finally:
+        monkeypatch.setattr(master_module, "_unlock_descriptor", original_unlock)
+        successor.release()
+
+
+def test_controller_rejects_duplicate_job_names(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, _, _ = _controller(tmp_path, clock)
+
+    async def callback() -> None:
+        return None
+
+    controller.add_job(PeriodicJob("positions", 60, callback))
+    with pytest.raises(ValueError, match="duplicate controller job"):
+        controller.add_job(PeriodicJob("positions", 30, callback))
+
+
+@pytest.mark.parametrize(
+    ("name", "interval", "message"),
+    [
+        ("", 1, "name cannot be empty"),
+        ("   ", 1, "name cannot be empty"),
+        ("positions", 0, "interval must be positive"),
+        ("positions", -1, "interval must be positive"),
+    ],
+)
+def test_periodic_job_rejects_invalid_schedule(
+    name: str, interval: int, message: str
+) -> None:
+    async def callback() -> None:
+        return None
+
+    with pytest.raises(ValueError, match=message):
+        PeriodicJob(name, interval, callback)
+
+
+def test_controller_rejects_collision_with_builtin_health_job(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, _, _ = _controller(tmp_path, clock)
+
+    async def callback() -> None:
+        return None
+
+    with pytest.raises(ValueError, match="duplicate controller job"):
+        controller.add_job(PeriodicJob("health", 30, callback))
+
+
+@pytest.mark.asyncio
+async def test_failed_reconciliation_disables_entries(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    async def reconciliation_failed() -> bool:
+        return False
+
+    controller, view, _ = _controller(tmp_path, clock, reconcile=reconciliation_failed)
+
+    assert not await controller.reconcile()
+    assert not view.reconciled
+    assert view.safety.state is RuntimeSafetyState.ENTRY_DISABLED
+    assert view.safety.reason == "reconciliation failed"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_exception_cannot_leave_entries_enabled(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    async def reconciliation_raised() -> bool:
+        raise ConnectionError("broker unavailable")
+
+    controller, view, _ = _controller(tmp_path, clock, reconcile=reconciliation_raised)
+
+    try:
+        await controller.reconcile()
+    except ConnectionError:
+        pass
+
+    assert not view.reconciled
+    assert not view.safety.permits_new_entry()
+
+
+@pytest.mark.asyncio
+async def test_database_health_failure_halts_and_records_evidence(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    async def unhealthy() -> bool:
+        return False
+
+    controller, view, metrics = _controller(tmp_path, clock, repository_health=unhealthy)
+
+    await controller.health_once()
+
+    assert view.safety.state is RuntimeSafetyState.HALTED
+    assert not view.database_healthy
+    assert view.broker_connected
+    assert view.last_safety_evidence is not None
+    assert not view.last_safety_evidence.database_writable
+    rendered = await metrics.render_prometheus()
+    assert "options_sentinel_runtime_safety_state 3" in rendered
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_exception_cannot_leave_entries_enabled(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    async def health_raised() -> bool:
+        raise ConnectionError("database unavailable")
+
+    controller, view, _ = _controller(tmp_path, clock, repository_health=health_raised)
+
+    try:
+        await controller.health_once()
+    except ConnectionError:
+        pass
+
+    assert not view.database_healthy
+    assert view.safety.state is RuntimeSafetyState.HALTED
+    assert not view.safety.permits_new_entry()
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_file_disables_entries_and_is_in_evidence(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, view, _ = _controller(tmp_path, clock)
+    controller.config.runtime.disabled_file.touch()
+
+    await controller.health_once()
+
+    assert view.last_safety_evidence is not None
+    assert not view.last_safety_evidence.kill_switch_clear
+    assert view.safety.state is RuntimeSafetyState.HALTED
+    assert not view.safety.permits_new_entry()
+
+
+@pytest.mark.asyncio
+async def test_missing_execution_health_evidence_fails_closed(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, view, _ = _controller(tmp_path, clock, execution_health=None)
+    view.execution_service_healthy = False
+
+    await controller.health_once()
+
+    assert view.last_safety_evidence is not None
+    assert not view.last_safety_evidence.execution_service_healthy
+    assert view.safety.state is RuntimeSafetyState.ENTRY_DISABLED
+
+
+@pytest.mark.asyncio
+async def test_execution_health_exception_fails_closed(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    async def execution_raised() -> bool:
+        raise ConnectionError("sensitive upstream response")
+
+    controller, view, _ = _controller(tmp_path, clock, execution_health=execution_raised)
+
+    await controller.health_once()
+
+    assert not view.execution_service_healthy
+    assert view.safety.state is RuntimeSafetyState.ENTRY_DISABLED
+    assert "execution-health: ConnectionError" in view.recent_errors
+    assert all("sensitive" not in error for error in view.recent_errors)
+
+
+@pytest.mark.asyncio
+async def test_unresolved_submission_evidence_halts_controller(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, view, _ = _controller(tmp_path, clock)
+    view.unresolved_submission = True
+
+    await controller.health_once()
+
+    assert view.last_safety_evidence is not None
+    assert view.last_safety_evidence.unresolved_submission
+    assert view.safety.state is RuntimeSafetyState.HALTED
+
+
+@pytest.mark.asyncio
+async def test_runtime_binding_mismatch_disables_entries(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, view, _ = _controller(tmp_path, clock)
+    view.binding = view.binding.model_copy(update={"demo_backend": DemoBackend.BROKER_SHADOW})
+
+    await controller.health_once()
+
+    assert view.last_safety_evidence is not None
+    assert not view.last_safety_evidence.environment_matches
+    assert view.safety.state is RuntimeSafetyState.ENTRY_DISABLED
+
+
+@pytest.mark.asyncio
+async def test_configured_execution_kill_switch_halts_runtime(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    controller, view, _ = _controller(
+        tmp_path,
+        clock,
+        environment_execution_disabled=True,
+    )
+
+    await controller.health_once()
+
+    assert view.last_safety_evidence is not None
+    assert not view.last_safety_evidence.kill_switch_clear
+    assert view.safety.state is RuntimeSafetyState.HALTED
+    assert not view.safety.permits_new_entry()
+
+
+class _BlockingClock(Clock):
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+        self.sleep_started = asyncio.Event()
+        self.release_sleep = asyncio.Event()
+        self.last_sleep_seconds: float | None = None
+
+    def now(self) -> datetime:
+        return self._now
+
+    async def sleep(self, seconds: float) -> None:
+        self.last_sleep_seconds = seconds
+        self.sleep_started.set()
+        await self.release_sleep.wait()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_startup_failure_releases_instance_lock(
+    tmp_path: Path, instant: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _BlockingClock(instant)
+    controller, _, _ = _controller(tmp_path, clock)
+    lock_path = controller.config.runtime.instance_lock_dir / "demo.lock"
+
+    async def startup_health_raised() -> None:
+        raise OSError("metrics unavailable")
+
+    monkeypatch.setattr(controller, "health_once", startup_health_raised)
+
+    with pytest.raises(OSError, match="metrics unavailable"):
+        await controller.start()
+
+    with InstanceLock(lock_path):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_failed_startup_does_not_strand_instance_lock(
+    tmp_path: Path, instant: datetime
+) -> None:
+    clock = _BlockingClock(instant)
+
+    async def reconciliation_raised() -> bool:
+        raise ConnectionError("broker unavailable")
+
+    controller, view, _ = _controller(tmp_path, clock, reconcile=reconciliation_raised)
+    lock_path = controller.config.runtime.instance_lock_dir / "demo.lock"
+
+    try:
+        await controller.start()
+    except ConnectionError:
+        with InstanceLock(lock_path):
+            pass
+    else:
+        try:
+            assert not view.safety.permits_new_entry()
+        finally:
+            await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_successful_periodic_job_records_metric(
+    tmp_path: Path, instant: datetime
+) -> None:
+    clock = _BlockingClock(instant)
+    controller, view, metrics = _controller(tmp_path, clock)
+
+    async def successful_job() -> None:
+        return None
+
+    task = asyncio.create_task(
+        controller._job_loop(PeriodicJob("positions", 11, successful_job))
+    )
+    await asyncio.wait_for(clock.sleep_started.wait(), timeout=1)
+    try:
+        assert view.safety.state is RuntimeSafetyState.NORMAL
+        rendered = await metrics.render_prometheus()
+        assert "options_sentinel_job_positions_success_total 1" in rendered
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_periodic_job_cancellation_is_not_recorded_as_failure(
+    tmp_path: Path, instant: datetime
+) -> None:
+    clock = _BlockingClock(instant)
+    controller, view, metrics = _controller(tmp_path, clock)
+    callback_started = asyncio.Event()
+    remain_blocked = asyncio.Event()
+
+    async def cancelled_job() -> None:
+        callback_started.set()
+        await remain_blocked.wait()
+
+    task = asyncio.create_task(
+        controller._job_loop(PeriodicJob("positions", 11, cancelled_job))
+    )
+    await asyncio.wait_for(callback_started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert view.safety.state is RuntimeSafetyState.NORMAL
+    assert not view.recent_errors
+    rendered = await metrics.render_prometheus()
+    assert "job_positions_failure_total" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_periodic_job_failure_is_contained_and_disables_entries(
+    tmp_path: Path, instant: datetime
+) -> None:
+    clock = _BlockingClock(instant)
+    controller, view, metrics = _controller(tmp_path, clock)
+
+    async def failed_job() -> None:
+        raise RuntimeError("feed disconnected")
+
+    job = PeriodicJob("catalysts", 17, failed_job)
+    task = asyncio.create_task(controller._job_loop(job))
+    await asyncio.wait_for(clock.sleep_started.wait(), timeout=1)
+    try:
+        assert not task.done()
+        assert clock.last_sleep_seconds == 17
+        assert view.safety.state is RuntimeSafetyState.ENTRY_DISABLED
+        assert view.recent_errors[-1] == "catalysts: RuntimeError"
+        rendered = await metrics.render_prometheus()
+        assert "options_sentinel_job_catalysts_failure_total 1" in rendered
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

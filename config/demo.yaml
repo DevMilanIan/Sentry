@@ -1,0 +1,11 @@
+version: demo-v1
+execution_environment: DEMO
+demo_backend: OFFLINE_SIM
+database_schema: demo
+runtime_directory: var/demo/offline_sim
+idempotency_namespace: demo-offline-sim
+initial_cash: "25.00"
+fill_model: conservative-v1
+fill_seed: 1729
+external_write_authority: false
+

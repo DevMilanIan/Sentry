@@ -1,0 +1,18 @@
+version: policy-set-v1
+profiles:
+  DEMO_EXPLORATORY:
+    version: demo-exploratory-v1
+    minimum_judge_confidence: "0.55"
+    minimum_trade_quality_score: "60"
+    skeptic_required: false
+    no_unresolved_primary_conflict: false
+    maximum_quote_age_seconds: 120
+  LIVE_CONSERVATIVE:
+    version: live-conservative-v1
+    minimum_judge_confidence: "0.80"
+    minimum_trade_quality_score: "78"
+    skeptic_required: true
+    no_unresolved_primary_conflict: true
+    maximum_quote_age_seconds: 45
+    explicit_capital_opportunity_cost_required: true
+

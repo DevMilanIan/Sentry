@@ -1,0 +1,28 @@
+version: strategy-v1
+attention_thresholds:
+  l1_watch: 25
+  l2_candidate: 50
+  l3_trade_worthy: 70
+  l4_deep_research: 85
+options:
+  minimum_dte: 7
+  maximum_dte: 45
+  maximum_absolute_moneyness_percent: "20"
+  maximum_candidates_for_judge: 3
+scoring:
+  surveillance:
+    catalyst_priority: 20
+    momentum_anomaly: 25
+    technical_structure: 15
+    market_sector_alignment: 10
+    underlying_liquidity: 10
+    federal_exposure: 10
+    event_urgency: 10
+  trade_quality:
+    catalyst_materiality: 20
+    adversarial_evidence: 20
+    contract_execution: 20
+    timing_confirmation: 15
+    payoff_plausibility: 15
+    market_sector_alignment: 10
+

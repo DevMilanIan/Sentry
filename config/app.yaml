@@ -1,0 +1,28 @@
+version: app-v1
+execution_environment: DEMO
+demo_backend: OFFLINE_SIM
+trading_mode: RESEARCH
+timezone: America/New_York
+database:
+  url: postgresql+asyncpg://sentinel:local-development-only@localhost:5432/sentinel
+  shared_schema: shared
+  demo_schema: demo
+  live_schema: live
+runtime:
+  instance_lock_dir: var/locks
+  disabled_file: var/TRADING_DISABLED
+  environment_execution_disabled: true
+  startup_health_window_seconds: 30
+  stale_market_data_seconds: 120
+  stale_account_data_seconds: 60
+dashboard:
+  host: 127.0.0.1
+  port: 8000
+  require_token_for_controls: true
+sentinel:
+  health_seconds: 30
+  positions_seconds: 60
+  equity_scan_seconds: 300
+  option_refresh_seconds: 600
+  catalyst_seconds: 900
+  research_seconds: 1200
