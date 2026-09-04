@@ -1,4 +1,24 @@
-# Resume after the authorized host reboot
+# Setup continuation checkpoint
+
+## Current checkpoint: September 4, 2026
+
+The authorized reboot and post-reboot deployment are complete. Do not repeat installers,
+recreate the private environment, reset the replay cursor, or download the models again.
+Actual PostgreSQL, migrations, backup/restore mechanics, app crash/restart, and database-outage
+recovery have now passed. Docker/Ollama are running; the loopback dashboard is intentionally
+DEMO/OFFLINE_SIM/RESEARCH/HALTED. The completed finite replay is not current-market surveillance.
+
+Private configuration is `%LOCALAPPDATA%\OptionsSentinel\runtime.env`, outside OneDrive with
+restricted NTFS ACLs. `Start-LocalStack.ps1` verifies signed local dependencies and calls the
+clock/configuration-gated launcher. Ordinary startup does not build/pull images. The limited
+interactive-user logon task is registered; a genuine subsequent boot/logon test remains pending.
+
+Continue source/runtime/federal/evaluation composition and safety verification. No Robinhood
+OAuth or account mapping is complete; no real qualification sessions, funding, or live trading
+are authorized by the offline deployment. See the latest `DEVLOG.md` entries and `OPERATIONS.md`.
+The historical pre-reboot checklist below is evidence, not an instruction to repeat its steps.
+
+## Historical pre-reboot checkpoint
 
 Checkpoint: September 3, 2026, late evening America/New_York. User explicitly approved the
 reboot after installations. No trading, funding, brokerage OAuth, or unattended startup task

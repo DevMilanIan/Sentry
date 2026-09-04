@@ -85,3 +85,75 @@ def test_compose_verification_is_opt_in_internal_and_excludes_runtime_mounts() -
     assert "ports" not in services["postgres"]
     assert services["trading-app"]["build"]["target"] == "runtime"
     assert services["trading-app"]["ports"] == ["127.0.0.1:8000:8000"]
+    assert "@sha256:" in services["postgres"]["image"]
+
+
+def test_container_base_and_installed_dependency_resolution_are_pinned() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    assert "FROM python:3.12-slim@sha256:" in dockerfile
+    assert "--constraint requirements/container-constraints.txt" in dockerfile
+    assert "pip install --upgrade pip" not in dockerfile
+    constraints = Path("requirements/container-constraints.txt").read_text(encoding="utf-8")
+    requirements = [line for line in constraints.splitlines() if line and not line.startswith("#")]
+    assert all("==" in requirement for requirement in requirements)
+    assert "mcp==2.1.1" in requirements
+
+
+def test_compose_private_environment_path_and_password_have_no_secret_default() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    assert services["trading-app"]["env_file"] == ["${SENTRY_ENV_FILE:-.env}"]
+    for service_name, variable in [
+        ("postgres", "POSTGRES_PASSWORD"),
+        ("trading-app", "SENTRY_DATABASE_URL"),
+        ("verify", "SENTRY_TEST_DATABASE_URL"),
+    ]:
+        assert "${POSTGRES_PASSWORD:?" in services[service_name]["environment"][variable]
+
+
+def test_windows_initializer_contract_keeps_secrets_external_private_and_create_new() -> None:
+    script = Path("scripts/windows/Initialize-LocalEnvironment.ps1").read_text(encoding="utf-8")
+    assert "OptionsSentinel\\runtime.env" in script
+    assert "Security.Cryptography.RandomNumberGenerator" in script
+    assert "New-Object byte[] 32" in script
+    assert "[IO.FileMode]::CreateNew" in script
+    assert "[IO.FileMode]::Create," not in script
+    assert "$acl.SetAccessRuleProtection($true, $false)" in script
+    assert "'S-1-5-18', 'S-1-5-32-544'" in script
+    assert script.index("Set-PrivateAcl $parentDirectory $true") < script.index(
+        "$random.GetBytes($bytes)"
+    )
+    assert script.index("if (Test-Path -LiteralPath $EnvironmentFile -PathType Leaf)") < (
+        script.index("$random.GetBytes($bytes)")
+    )
+    assert "SENTRY_EXECUTION_ENVIRONMENT=DEMO" in script
+    assert "SENTRY_DEMO_BACKEND=OFFLINE_SIM" in script
+    assert "SENTRY_TRADING_MODE=RESEARCH" in script
+    assert "'SENTRY_LIVE_AUTHORIZATION_FILE='" in script
+    assert "Reparse points are not supported" in script
+    assert "arbitrary directory ACL changes are not allowed" in script
+    for line in script.splitlines():
+        if "Write-Host" in line or "Write-Output" in line:
+            assert "$databasePassword" not in line
+            assert "$dashboardToken" not in line
+            assert "$content" not in line
+            assert "$settings" not in line
+
+
+def test_windows_startup_uses_same_file_for_both_compose_environment_mechanisms() -> None:
+    script = Path("scripts/windows/Start-Sentinel.ps1").read_text(encoding="utf-8")
+    assert "'Initialize-LocalEnvironment.ps1') -EnvironmentFile $envFile -ValidateOnly" in script
+    assert "$env:SENTRY_ENV_FILE = $envFile" in script
+    assert "docker compose --env-file $envFile up --build --detach" in script
+    assert "[switch]$Build" in script
+    assert "if ($Build) {" in script
+    assert "docker compose --env-file $envFile up --no-build --detach --pull never" in script
+    assert "docker compose --env-file $envFile ps" in script
+    assert 'Exists = Test-Path -LiteralPath "Env:$key"' in script
+    assert 'Remove-Item -LiteralPath "Env:$key"' in script
+    assert 'Set-Item -LiteralPath "Env:$key" -Value $previousEnvironment[$key].Value' in script
+    assert "SetEnvironmentVariable($key, $null" not in script
+    assert "if ($LASTEXITCODE -ne 0)" in script
+    for line in script.splitlines():
+        if "Remove-Item" in line:
+            assert 'Remove-Item -LiteralPath "Env:$key"' in line

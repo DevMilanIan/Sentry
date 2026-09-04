@@ -8,6 +8,7 @@ This additional test requires explicit SENTRY_TEST_ALLOW_DATABASE_CREATION=1.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from collections.abc import AsyncIterator
@@ -82,10 +83,18 @@ async def disposable_migration_database() -> AsyncIterator[URL]:
 
 async def test_real_postgres_alembic_fresh_upgrade_and_repeat_are_complete(
     disposable_migration_database: URL,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     database_url = disposable_migration_database.render_as_string(hide_password=False)
+    root_handlers = tuple(logging.getLogger().handlers)
+    logger = logging.getLogger("app.notifications.provider")
+    logger_disabled = logger.disabled
     await asyncio.to_thread(_upgrade_database, database_url)
     await asyncio.to_thread(_upgrade_database, database_url)
+    assert tuple(logging.getLogger().handlers) == root_handlers
+    assert logger.disabled == logger_disabled
+    logger.warning("migration logging continuity probe")
+    assert "migration logging continuity probe" in caplog.text
     engine = create_async_engine(disposable_migration_database)
     try:
         async with engine.connect() as connection:

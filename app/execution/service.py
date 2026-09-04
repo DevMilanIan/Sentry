@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -258,9 +259,17 @@ class ExecutionService:
         kill_switch_active: Callable[[], bool] = lambda: False,
         healthcheck: Callable[[], bool] = lambda: True,
         command_argument_builder: CommandArgumentBuilder | None = None,
+        cancellation_audit_timeout_seconds: float = 5.0,
     ) -> None:
         if not namespace:
             raise ValueError("execution namespace is required")
+        if (
+            not math.isfinite(cancellation_audit_timeout_seconds)
+            or not 0 < cancellation_audit_timeout_seconds <= 10
+        ):
+            raise ValueError(
+                "cancellation audit timeout must be finite and between 0 and 10 seconds"
+            )
         self._broker = broker
         self._quotes = quotes
         self._risk = risk_engine
@@ -274,6 +283,13 @@ class ExecutionService:
         self._healthcheck = healthcheck
         self._argument_builder = command_argument_builder or self._default_arguments
         self._execution_lock = asyncio.Lock()
+        self._cancellation_audit_timeout_seconds = cancellation_audit_timeout_seconds
+        self._interrupted_write_intents: set[UUID] = set()
+
+    @property
+    def interrupted_write_intents(self) -> frozenset[UUID]:
+        """Process-local fail-closed latch; durable records survive process restart."""
+        return frozenset(self._interrupted_write_intents)
 
     async def execute(
         self,
@@ -448,9 +464,13 @@ class ExecutionService:
 
         try:
             order = await self._broker.place_option_order(command, proposal.contract)
+        except asyncio.CancelledError:
+            await self._record_interrupted_write(pending, "placement")
+            raise
         except (TimeoutError, ConnectionError, SubmissionUnknownError) as exc:
             if self._environment is not ExecutionEnvironment.LIVE:
                 raise
+            self._safety.emergency_stop("unresolved external broker submission")
             unknown = pending.model_copy(update={"state": OrderState.SUBMISSION_UNKNOWN})
             await self._store.save_order(unknown)
             await self._transition(
@@ -459,7 +479,6 @@ class ExecutionService:
                 OrderState.SUBMISSION_UNKNOWN,
                 "external broker may have accepted command",
             )
-            self._safety.emergency_stop("unresolved external broker submission")
             raise SubmissionUnknownError(
                 "broker write outcome is unknown; do not retry before reconciliation"
             ) from exc
@@ -502,6 +521,7 @@ class ExecutionService:
         idempotency key, immutable intent, and unknown-submission handling.
         """
 
+        self._deny_interrupted_writes()
         if target.environment is not self._environment:
             raise ExecutionDenied("target order environment does not match startup binding")
         if target.state not in {OrderState.OPEN, OrderState.PARTIAL}:
@@ -634,9 +654,13 @@ class ExecutionService:
             raise ExecutionDenied("cancellation safety changed before transmission")
         try:
             result = await self._broker.cancel_option_order(command, target_id)
+        except asyncio.CancelledError:
+            await self._record_interrupted_write(pending, "cancellation")
+            raise
         except (TimeoutError, ConnectionError, SubmissionUnknownError) as exc:
             if self._environment is not ExecutionEnvironment.LIVE:
                 raise
+            self._safety.emergency_stop("unresolved external broker cancellation")
             unknown = pending.model_copy(update={"state": OrderState.SUBMISSION_UNKNOWN})
             await self._store.save_order(unknown)
             await self._transition(
@@ -645,7 +669,6 @@ class ExecutionService:
                 OrderState.SUBMISSION_UNKNOWN,
                 "external broker cancellation outcome is unknown",
             )
-            self._safety.emergency_stop("unresolved external broker cancellation")
             raise SubmissionUnknownError(
                 "broker cancellation outcome is unknown; do not retry before reconciliation"
             ) from exc
@@ -659,6 +682,43 @@ class ExecutionService:
             "broker cancellation state observed",
         )
         return CancellationResult(intent, command, correlated)
+
+    async def _record_interrupted_write(self, pending: BrokerOrder, action: str) -> None:
+        """Classify cancellation without swallowing it or replaying the command.
+
+        Task cancellation is not proof that the broker failed to accept bytes.
+        This also applies to a local shadow-ledger mutation; it never grants a
+        Demo adapter external authority. SUBMITTING was durable before the await.
+        If this best-effort update fails, that original unresolved evidence and
+        the process-local latch remain. No shielded/detached journal task escapes
+        controller lifetime tracking. Cancellation-resistant storage may exceed
+        this cooperative deadline, so controller shutdown retains its instance
+        lock until the executing callback has actually terminated.
+        """
+        self._interrupted_write_intents.add(pending.intent_id)
+        self._safety.emergency_stop("interrupted broker command requires reconciliation")
+        try:
+            async with asyncio.timeout(self._cancellation_audit_timeout_seconds):
+                await self._store.save_order(
+                    pending.model_copy(update={"state": OrderState.SUBMISSION_UNKNOWN})
+                )
+                await self._transition(
+                    pending.intent_id,
+                    OrderState.SUBMITTING,
+                    OrderState.SUBMISSION_UNKNOWN,
+                    f"task cancelled during broker {action}; acceptance is unproven",
+                )
+        except asyncio.CancelledError:
+            # A second cancellation must not replace the caller's original one.
+            self._safety.emergency_stop("interrupted broker command audit is incomplete")
+        except Exception:
+            # Never expose upstream connection strings or response bodies.
+            self._safety.emergency_stop("interrupted broker command audit is incomplete")
+
+    def _deny_interrupted_writes(self) -> None:
+        if self._interrupted_write_intents:
+            self._safety.emergency_stop("interrupted broker command requires reconciliation")
+            raise ExecutionDenied("interrupted write latch blocks execution until process restart")
 
     async def reconcile_submission(self, intent_id: UUID) -> SubmissionReconciliation:
         local = await self._store.get_order(intent_id)
@@ -752,6 +812,7 @@ class ExecutionService:
         await self._store.replace_positions(positions)
 
     def _preflight(self, proposal: TradeProposal, mode: TradingMode) -> None:
+        self._deny_interrupted_writes()
         if self._environment is ExecutionEnvironment.LIVE and mode is TradingMode.SHADOW:
             raise ExecutionDenied("LIVE+SHADOW is not a defined execution mode")
         if mode is TradingMode.RESEARCH:

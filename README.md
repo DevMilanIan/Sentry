@@ -16,9 +16,9 @@ Core offline lifecycle, continuous finite replay, durable execution-store code, 
 reconciliation, local reporting, and fault regressions are implemented. The measured routine
 model is `qwen3.5:4b`; see `docs/MODEL_BENCHMARK.md`.
 
-This is not yet an unattended production deployment or a completed V1. WSL/Docker packages
-are installed, but host reboot activation and real PostgreSQL verification are pending.
-See `docs/SETUP_RESUME.md`. Broker-shadow authentication/schema
+The post-reboot offline deployment is running. Actual PostgreSQL migrations, backup/restore,
+database-outage recovery, and container crash/restart checks pass. This is not a completed V1
+or account-backed production qualification. See `docs/SETUP_RESUME.md`. Broker-shadow authentication/schema
 mapping, five real qualification sessions, and later user-owned Live gates remain open.
 
 ## Safe quick start
@@ -27,9 +27,8 @@ Requirements: Python 3.12+, or Docker Desktop/Compose. Ollama is optional for he
 reasoning; deterministic surveillance, replay, and position monitoring continue without it.
 
 ```powershell
-if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
-# Set unique local secrets in .env; never commit it.
-python -m venv .venv
+# Create/install .venv only on a new machine; preserve the existing environment here.
+if (-not (Test-Path -LiteralPath .venv)) { python -m venv .venv }
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 .\.venv\Scripts\python -m pytest
 .\.venv\Scripts\python -m app.main demo-once
@@ -38,10 +37,15 @@ python -m venv .venv
 Or start PostgreSQL and the application:
 
 ```powershell
-if (-not (Test-Path -LiteralPath .env)) { Copy-Item .env.example .env }
-# Set POSTGRES_PASSWORD and SENTRY_DASHBOARD_TOKEN first.
-docker compose up --build
+# PowerShell 7; preserves the existing private LocalAppData environment.
+.\scripts\windows\Initialize-LocalEnvironment.ps1
+.\scripts\windows\Start-LocalStack.ps1
 ```
+
+The installed machine already has the tested images. New deployments or reviewed source updates
+need an intentional `Start-Sentinel.ps1 -Build` after dependency readiness; ordinary logon startup
+never builds or pulls images. Container dependency versions and base images are pinned to the
+verified resolution; updates require rerunning the complete suite.
 
 The dashboard binds to <http://127.0.0.1:8000>. State-changing controls require the dashboard
 token configured outside source control. See `docs/OPERATIONS.md` before running continuously.
@@ -58,10 +62,13 @@ token configured outside source control. See `docs/OPERATIONS.md` before running
 
 See `docs/LIVE_GATES.md` for the deliberately unmet Live requirements.
 
-## Verification checkpoint — September 3, 2026
+## Verification checkpoint — September 4, 2026
 
-461 tests pass; eleven real-PostgreSQL cases are explicitly skipped pending a test database.
-Ruff and strict mypy pass. The default is measured `qwen3.5:4b`, with trading still disabled.
+Actual PostgreSQL's 15-check verification target passed, including backup/restore. The subsequent
+full Linux run passed 484 tests with 20 Windows-only cases skipped; the later native suite passed
+525 with 12 actual-PostgreSQL cases skipped there (covered in containers). Ruff and strict mypy
+passed. See the latest development log for subsequent safety additions and updated aggregate
+counts. The default is measured `qwen3.5:4b`, with trading still disabled.
 Read-only MCP transport, durable shadow recovery, bounded official-feed ingestion, and the
 2026–2028 calendar have local test coverage, not authenticated production qualification.
 See [operations](docs/OPERATIONS.md), [source coverage](docs/CATALYST_INGESTION.md), and

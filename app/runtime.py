@@ -45,11 +45,15 @@ class ApplicationRuntime:
     async def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
+        # An incomplete stop retains the instance lock and clients until the
+        # in-flight callbacks finish. Allow a later close attempt to retry it.
         await self.controller.stop()
-        await self.model_provider.close()
-        if self.database is not None:
-            await self.database.close()
+        try:
+            await self.model_provider.close()
+        finally:
+            if self.database is not None:
+                await self.database.close()
+        self._closed = True
 
 
 async def build_application(
@@ -233,6 +237,8 @@ async def build_application(
         metrics,
         dashboard_token=dashboard_token,
         reconcile=controller.reconcile,
+        federal_repository=audit,
+        reference_clock=clock,
     )
     runtime = ApplicationRuntime(
         loaded, database, audit, view, controller, broker, provider, application, offline

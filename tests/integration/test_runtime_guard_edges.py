@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -87,3 +88,27 @@ async def test_replay_eof_blocks_dispatch_without_waiting_for_health_tick(
             await offline.execution.execute(proposal)
     finally:
         await runtime.close()
+
+
+async def test_runtime_close_can_retry_an_incomplete_controller_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded = load_config()
+    provider = ScriptedReplayModelProvider(_scripted_outputs())
+    runtime = await build_application(
+        loaded,
+        repository=InMemoryAuditRepository(loaded.bind_runtime()),
+        model_provider=provider,
+    )
+    stop = AsyncMock(side_effect=[RuntimeError("shutdown incomplete"), None])
+    close_provider = AsyncMock()
+    monkeypatch.setattr(runtime.controller, "stop", stop)
+    monkeypatch.setattr(provider, "close", close_provider)
+    with pytest.raises(RuntimeError, match="shutdown incomplete"):
+        await runtime.close()
+    assert not runtime._closed
+    close_provider.assert_not_awaited()
+    await runtime.close()
+    assert runtime._closed
+    close_provider.assert_awaited_once()
+    assert stop.await_count == 2

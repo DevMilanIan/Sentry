@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from app.clock.base import Clock
 from app.domain.enums import RuntimeSafetyState
@@ -50,7 +50,7 @@ class SafetyController:
         self._clock = clock
         self._state = RuntimeSafetyState.ENTRY_DISABLED
         self._reason = "startup reconciliation and health window required"
-        self._healthy_since: datetime | None = None
+        self._healthy_since: float | None = None
         self._window = startup_health_window
         self._entries_paused = False
 
@@ -89,7 +89,9 @@ class SafetyController:
         self.observe(evidence, manual_halt_cleared=manual_halt_cleared)
 
     def observe(self, evidence: SafetyEvidence, *, manual_halt_cleared: bool = False) -> None:
-        now = self._clock.now()
+        # NTP/manual wall-clock changes cannot accelerate the real health window.
+        # Virtual clocks advance this value causally with replay time.
+        now = self._clock.elapsed_seconds()
         if not evidence.kill_switch_clear:
             self.emergency_stop("kill switch active")
             return
@@ -112,7 +114,10 @@ class SafetyController:
             self._state = RuntimeSafetyState.ENTRY_DISABLED
             self._reason = "health window accumulating"
             return
-        if now - self._healthy_since >= self._window:
+        if now < self._healthy_since:
+            self.degrade(RuntimeSafetyState.ENTRY_DISABLED, "elapsed clock moved backward")
+            return
+        if now - self._healthy_since >= self._window.total_seconds():
             self._state = RuntimeSafetyState.NORMAL
             self._reason = "all deterministic health gates passed"
 

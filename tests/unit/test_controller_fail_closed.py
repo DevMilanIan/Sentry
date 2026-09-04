@@ -91,6 +91,7 @@ def _controller(
     reconcile: Callable[[], Awaitable[bool]] = _true,
     execution_health: Callable[[], Awaitable[bool]] | None = _true,
     environment_execution_disabled: bool = False,
+    health_timeout_seconds: float = 10.0,
 ) -> tuple[MasterController, RuntimeView, MetricsRegistry]:
     view = _normal_view(_binding(tmp_path), clock)
     metrics = MetricsRegistry()
@@ -106,6 +107,7 @@ def _controller(
         broker_health=broker_health,
         reconcile=reconcile,
         execution_health=execution_health,
+        health_timeout_seconds=health_timeout_seconds,
     )
     return controller, view, metrics
 
@@ -523,3 +525,334 @@ async def test_periodic_job_failure_is_contained_and_disables_entries(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), 3601])
+def test_periodic_job_rejects_unbounded_deadline(timeout: float) -> None:
+    async def callback() -> None:
+        return None
+
+    with pytest.raises(ValueError, match="timeout must be finite"):
+        PeriodicJob("positions", 60, callback, timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), 11])
+def test_controller_rejects_unbounded_health_deadline(
+    tmp_path: Path, clock: VirtualClock, timeout: float
+) -> None:
+    with pytest.raises(ValueError, match="health timeout must be finite"):
+        _controller(tmp_path, clock, health_timeout_seconds=timeout)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("component", ["database", "broker", "execution"])
+async def test_health_timeout_is_bounded_latched_and_never_replayed(
+    tmp_path: Path, clock: VirtualClock, component: str
+) -> None:
+    calls = 0
+    cancelled = asyncio.Event()
+
+    async def blocked() -> bool:
+        nonlocal calls
+        calls += 1
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return True
+
+    controller, view, _ = _controller(
+        tmp_path,
+        clock,
+        repository_health=blocked if component == "database" else _true,
+        broker_health=blocked if component == "broker" else _true,
+        execution_health=blocked if component == "execution" else _true,
+        health_timeout_seconds=0.02,
+    )
+    await asyncio.wait_for(controller.health_once(), timeout=0.3)
+    await asyncio.wait_for(cancelled.wait(), timeout=0.3)
+    assert view.safety.state is RuntimeSafetyState.HALTED
+    assert not view.reconciled
+    assert not view.execution_service_healthy
+    assert view.last_safety_evidence is not None
+    assert not view.last_safety_evidence.permits_normal
+    assert f"{component}-health: TimeoutError" in view.recent_errors
+    await controller.health_once()
+    assert calls == 1
+    assert not await controller.reconcile()
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_health_timeout_invalidates_evidence_before_other_probes_finish(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    release_broker = asyncio.Event()
+    broker_started = asyncio.Event()
+
+    async def database_timeout() -> bool:
+        raise TimeoutError("secret connection details must not be recorded")
+
+    async def broker_wait() -> bool:
+        broker_started.set()
+        await release_broker.wait()
+        return True
+
+    controller, view, _ = _controller(
+        tmp_path, clock, repository_health=database_timeout, broker_health=broker_wait,
+        health_timeout_seconds=0.2,
+    )
+    task = asyncio.create_task(controller.health_once())
+    await broker_started.wait()
+    await asyncio.sleep(0.01)
+    try:
+        assert not task.done()
+        assert view.safety.state is RuntimeSafetyState.HALTED
+        assert not view.database_healthy
+        assert view.last_safety_evidence is not None
+        assert not view.last_safety_evidence.database_writable
+        assert all("secret" not in item for item in view.recent_errors)
+    finally:
+        release_broker.set()
+        await task
+        await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_job_stops_without_retry_and_independent_monitor_keeps_running(
+    tmp_path: Path, instant: datetime
+) -> None:
+    clock = _BlockingClock(instant)
+    controller, view, metrics = _controller(tmp_path, clock, health_timeout_seconds=0.02)
+    calls = 0
+    monitored = asyncio.Event()
+
+    async def interrupted_dispatch() -> None:
+        nonlocal calls
+        calls += 1
+        await asyncio.Event().wait()
+
+    async def positions() -> None:
+        monitored.set()
+
+    dispatch = asyncio.create_task(controller._job_loop(
+        PeriodicJob("dispatch", 1, interrupted_dispatch, timeout_seconds=0.02)
+    ))
+    monitor = asyncio.create_task(controller._job_loop(PeriodicJob("positions", 1, positions)))
+    try:
+        await asyncio.wait_for(dispatch, timeout=0.3)
+        await asyncio.wait_for(monitored.wait(), timeout=0.3)
+        assert not monitor.done()
+        assert calls == 1
+        assert view.safety.state is RuntimeSafetyState.HALTED
+        assert "dispatch: TimeoutError" in view.recent_errors
+        assert "options_sentinel_job_dispatch_failure_total 1" in await metrics.render_prometheus()
+    finally:
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
+        await controller.stop()
+
+
+async def _ignore_cancellation_until(release: asyncio.Event) -> None:
+    while not release.is_set():
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            continue
+
+
+@pytest.mark.asyncio
+async def test_resistant_job_retains_lock_until_callback_actually_finishes(
+    tmp_path: Path, instant: datetime
+) -> None:
+    clock = _BlockingClock(instant)
+    controller, view, _ = _controller(tmp_path, clock, health_timeout_seconds=0.02)
+    release = asyncio.Event()
+    completed = asyncio.Event()
+    calls = 0
+
+    async def resistant_dispatch() -> None:
+        nonlocal calls
+        calls += 1
+        await _ignore_cancellation_until(release)
+        # Simulate late mutation by a callback that incorrectly suppressed cancellation.
+        view.reconciled = True
+        view.execution_service_healthy = True
+        completed.set()
+
+    controller.add_job(PeriodicJob("dispatch", 1, resistant_dispatch, timeout_seconds=0.02))
+    await controller.start()
+    contender = InstanceLock(controller.config.runtime.instance_lock_dir / "demo.lock")
+    try:
+        await asyncio.sleep(0.05)
+        assert view.safety.state is RuntimeSafetyState.HALTED
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await controller.stop()
+        with pytest.raises(RuntimeError, match="runtime lock already exists"):
+            contender.acquire()
+        assert calls == 1
+        assert not completed.is_set()
+        release.set()
+        await asyncio.wait_for(completed.wait(), timeout=0.3)
+        await asyncio.sleep(0)
+        assert not view.reconciled
+        assert not view.execution_service_healthy
+        assert view.safety.state is RuntimeSafetyState.HALTED
+    finally:
+        release.set()
+        await completed.wait()
+        await asyncio.sleep(0)
+        await controller.stop()
+    with contender:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_late_health_success_is_discarded_and_cannot_clear_timeout_latch(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def resistant_health() -> bool:
+        await _ignore_cancellation_until(release)
+        view.database_healthy = True
+        view.reconciled = True
+        completed.set()
+        return True
+
+    controller, view, _ = _controller(
+        tmp_path, clock, repository_health=resistant_health, health_timeout_seconds=0.02
+    )
+    try:
+        await asyncio.wait_for(controller.health_once(), timeout=0.3)
+        assert not view.database_healthy
+        release.set()
+        await asyncio.wait_for(completed.wait(), timeout=0.3)
+        await asyncio.sleep(0)
+        assert not view.database_healthy
+        assert not view.reconciled
+        assert not view.execution_service_healthy
+        assert view.safety.state is RuntimeSafetyState.HALTED
+        assert view.last_safety_evidence is not None
+        assert not view.last_safety_evidence.permits_normal
+    finally:
+        release.set()
+        await completed.wait()
+        await asyncio.sleep(0)
+        await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_external_health_cancellation_propagates_without_timeout_classification(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked() -> bool:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return True
+
+    controller, view, _ = _controller(tmp_path, clock, repository_health=blocked)
+    task = asyncio.create_task(controller.health_once())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(cancelled.wait(), timeout=0.3)
+    assert not controller._timed_out_callbacks
+    assert not view.recent_errors
+    await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_startup_keeps_lock_while_reconciliation_still_runs(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def resistant_reconcile() -> bool:
+        entered.set()
+        await _ignore_cancellation_until(release)
+        completed.set()
+        return True
+
+    controller, view, _ = _controller(
+        tmp_path, clock, reconcile=resistant_reconcile, health_timeout_seconds=0.02
+    )
+    startup = asyncio.create_task(controller.start())
+    await entered.wait()
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+    contender = InstanceLock(controller.config.runtime.instance_lock_dir / "demo.lock")
+    try:
+        with pytest.raises(RuntimeError, match="runtime lock already exists"):
+            contender.acquire()
+        assert view.safety.state is RuntimeSafetyState.HALTED
+    finally:
+        release.set()
+        await completed.wait()
+        await asyncio.sleep(0)
+        await controller.stop()
+    with contender:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_controller_start_cannot_duplicate_existing_job_loops(
+    tmp_path: Path, instant: datetime
+) -> None:
+    controller, _, _ = _controller(tmp_path, _BlockingClock(instant))
+    await controller.start()
+    try:
+        with pytest.raises(RuntimeError, match="cannot be started twice"):
+            await controller.start()
+    finally:
+        await controller.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reconciliation_does_not_overlap_or_accept_late_success(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    release = asyncio.Event()
+    completed = asyncio.Event()
+    calls = 0
+
+    async def resistant_reconcile() -> bool:
+        nonlocal calls
+        calls += 1
+        await _ignore_cancellation_until(release)
+        view.reconciled = True
+        completed.set()
+        return True
+
+    controller, view, _ = _controller(
+        tmp_path, clock, reconcile=resistant_reconcile, health_timeout_seconds=0.02
+    )
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(controller.reconcile(), controller.reconcile()), timeout=0.3
+        )
+        assert results == [False, False]
+        assert calls == 1
+        assert view.safety.state is RuntimeSafetyState.HALTED
+        release.set()
+        await asyncio.wait_for(completed.wait(), timeout=0.3)
+        await asyncio.sleep(0)
+        assert not view.reconciled
+        assert not await controller.reconcile()
+        assert calls == 1
+    finally:
+        release.set()
+        await completed.wait()
+        await asyncio.sleep(0)
+        await controller.stop()

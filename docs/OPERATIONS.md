@@ -8,10 +8,11 @@ fail-closed even when healthy. `config/live.yaml` has external-write authority d
 starts `HALTED`. Neither a mode change, a funded account, nor a passing offline test grants
 external-write authority.
 
-As of September 3 late evening, Docker Desktop, WSL 2.7.12, Ubuntu's package, and host Python
-are installed. Windows Time is Automatic/Running and passed the initial offset gate. The two
-Windows features still require a reboot; Docker engine, Ubuntu initialization, and a running
-PostgreSQL deployment are unverified. Ollama and both benchmark models remain installed.
+As of September 4, the authorized reboot is complete. WSL 2.7.12, Ubuntu 24.04 (default local
+user `sentinel`), Docker Desktop's Linux engine, PostgreSQL, and the offline application are
+running. The dashboard is loopback-only and intentionally HALTED. Windows Time is
+Automatic/Running; the latest bounded startup probe measured 2–9 ms absolute offset.
+Ollama and both benchmark models remain installed; the container reaches native Ollama.
 See `docs/SETUP_RESUME.md` for the checkpoint and `docs/MACHINE_AUDIT.md` for evidence. No broker OAuth,
 funding, account-backed shadow qualification, or live activation has been performed.
 
@@ -47,41 +48,52 @@ provider. There is no cloud fallback.
 
 After the host prerequisites and clock checks pass:
 
-1. Create ignored `.env` from `.env.example` only if it does not already exist; preserve any
-   existing local configuration. Set a long random `SENTRY_DASHBOARD_TOKEN` and an explicit
-   strong `POSTGRES_PASSWORD`, replacing both example placeholders. Compose rejects a missing
-   or empty database password, but does not detect an unchanged example placeholder. Prefer a
-   long URL-safe password because Compose interpolates it into the database URL. Never commit
-   or display the rendered secrets.
+1. Run `scripts/windows/Initialize-LocalEnvironment.ps1` using PowerShell 7. It generates
+   independent database/dashboard secrets in `%LOCALAPPDATA%\OptionsSentinel\runtime.env`,
+   outside the repository and OneDrive, with restricted NTFS permissions. On this machine
+   that file already exists: the initializer validates and preserves it. Do not recreate it,
+   copy it into `.env`, or display its contents. The initializer only accepts the safe offline
+   deployment profile; future reviewed broker/Live configuration needs a separate workflow.
 2. Keep the environment/backend/mode and execution-disable gate at the checked-in safe values.
    For Docker Desktop, the native Ollama endpoint is
    `SENTRY_OLLAMA_URL=http://host.docker.internal:11434`. Verify that the container can reach the
    local endpoint without exposing Ollama publicly. If it cannot, treat model health as failed;
    do not disable firewall protection to force connectivity.
-3. Run `docker compose up --build -d` from the repository root, or use
-   `scripts/windows/Start-Sentinel.ps1` after reviewing its host checks. The launcher checks
-   Windows Time is running, but does not itself prove the clock offset is within 250 ms.
+3. Run `scripts/windows/Start-LocalStack.ps1`. It verifies the installed signed Docker/Ollama
+   binaries, ensures local dependency readiness, selects only the local Docker Linux engine,
+   and calls the fail-closed launcher. The launcher validates private configuration and checks
+   actual clock synchronization plus five offset measurements within 250 ms before Compose.
+   An intentional deployment build is separate from ordinary logon startup.
 4. Inspect `docker compose ps`, local logs, the dashboard at `http://127.0.0.1:8000/`, and
    `/api/state`. `/health` returning 503 is expected while `HALTED`; a 200 is not sufficient
    proof that entries are enabled. Inspect environment, backend, safety reason, database,
    execution health, reconciliation, freshness, and unresolved-submission fields together.
-5. Verify actual database-backed crash/restart recovery before unattended operation. The
-   repository's injected/in-memory tests do not replace this deployment check.
+5. Actual process SIGKILL/restart preserved the completed replay cursor, fixture hash, cash,
+   and HALTED state. A separate real database outage became visible in 14 seconds; after
+   database restoration, explicit reconciliation succeeded without resuming trading.
 
-An opt-in container verification target is now available after PostgreSQL can start:
-`docker compose --profile verification run --build --rm verify`. It runs ten isolated-schema
-tests and a fresh/repeated Alembic migration test in an exclusively created, ownership-tagged
-disposable database. It does not migrate the deployed `sentinel` database or expose a database
-host port. See `tests/integration/POSTGRES.md`; these eleven tests remain unexecuted before reboot.
+For direct Compose diagnostics, set `$env:SENTRY_ENV_FILE` to the private file above and pass
+`--env-file $env:SENTRY_ENV_FILE` to every Compose command. Do not print `compose config`:
+rendered configuration includes secrets. The launcher removes inherited runtime overrides
+for its invocation and restores them afterward; an empty `POSTGRES_PASSWORD` shell variable
+also overrides the file, so remove the environment variable rather than assigning an empty value.
+
+The opt-in verification command is
+`docker compose --env-file $env:SENTRY_ENV_FILE --profile verification run --build --rm verify`.
+All 15 checks passed against actual PostgreSQL: isolated schemas, fresh/repeated migrations,
+restart recovery, and a real `pg_dump`/`pg_restore` roundtrip in ownership-tagged disposable
+databases, plus subprocess security cases. It does not replace the deployed `sentinel` database
+or expose a database host port. See `tests/integration/POSTGRES.md`.
 The build context excludes local secrets, virtual environments, and downloaded installers.
 
 Compose uses PostgreSQL 17 on a named volume, with no database port published to the host. The
 application port is published only at `127.0.0.1:8000`. Configuration is mounted read-only and
 `var/` is mounted for runtime state. `SENTRY_DATABASE_URL` is set by Compose from
-`POSTGRES_PASSWORD`; a different URL in `.env` does not override that service-level setting.
+`POSTGRES_PASSWORD`; a different URL in the environment file does not override that service-level setting.
 
-Stop the application with `docker compose stop trading-app`; stop the full stack with
-`docker compose down`. Do not add `--volumes` to normal shutdown: it removes database storage.
+Stop the application with `docker compose --env-file $env:SENTRY_ENV_FILE stop trading-app`;
+stop the full stack with `docker compose --env-file $env:SENTRY_ENV_FILE down`.
+Do not add `--volumes` to normal shutdown: it removes database storage.
 Stopping the controller does not cancel broker orders or flatten positions.
 
 For a future native deployment with a verified database, use the same virtual-environment
@@ -154,8 +166,9 @@ remain separate explicit user gates after qualification; this runbook does not a
   process death; the presence of `demo.lock` or `live.lock` alone is not a stale-lock failure.
   Do not unlink a lock file to bypass another controller.
 - Back up PostgreSQL with `pg_dump` into restricted local storage; never commit dumps. Test
-  restoring into an isolated database before relying on the backup. Backup scheduling and a
-  verified deployment restore are not established by the presence of these instructions.
+  restoring into an isolated database before relying on the backup. The isolated test now
+  verifies real backup/restore mechanics and exact simulated journal/ledger restoration, but
+  does not create scheduled operational backups or restore the deployed database.
 - If broker authorization is added later, rotate OAuth/session material through the approved
   flow; never put it in prompts, logs, fixtures, or shared diagnostics.
 

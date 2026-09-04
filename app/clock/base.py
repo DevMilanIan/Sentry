@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +15,10 @@ class Clock(ABC):
     async def sleep(self, seconds: float) -> None:
         """Wait or advance by the requested duration."""
 
+    def elapsed_seconds(self) -> float:
+        """Replay elapsed time; real infrastructure overrides with monotonic time."""
+        return self.now().timestamp()
+
 
 class RealClock(Clock):
     def now(self) -> datetime:
@@ -21,6 +26,9 @@ class RealClock(Clock):
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
+
+    def elapsed_seconds(self) -> float:
+        return time.monotonic()
 
 
 class VirtualClock(Clock):

@@ -1,11 +1,34 @@
 # Machine audit
 
-**Initial audit:** 2026-09-02; **setup update:** 2026-09-03 (America/New_York).
+**Initial audit:** 2026-09-02; **latest setup update:** 2026-09-04 (America/New_York).
 
 **Safety conclusion:** The hardware supports local inference and credential-free offline testing.
-Host installation has progressed; reboot activation and a running PostgreSQL deployment remain open. This is
-not evidence of unattended-service readiness or permission for broker authentication, funding,
-or live trading.
+The reboot is complete; the actual Docker/PostgreSQL/offline deployment and container/database
+recovery tests pass. This is not account-backed qualification, permission for funding, or live
+trading. Historical September 3 observations below are retained and superseded by this update.
+
+## September 4 post-reboot observations
+
+- Last boot verified as September 3 at 23:41:45 Eastern. WSL 2.7.12/kernel 6.18.33.2-2 and
+  Ubuntu 24.04 now run; `sentinel` is the local non-sudo, locked-password default Linux user.
+- Docker Desktop 4.89.0's local Linux engine, CLI 29.7.2, and Compose 5.5.0 work. The app and
+  PostgreSQL containers run; only `127.0.0.1:8000` is published. No Ubuntu Docker engine or
+  native Windows PostgreSQL service was added.
+- Windows Time initially missed the offset gate after reboot (~744 ms). Normal authorized UAC
+  applied Min/MaxPollInterval 6, UpdateInterval 100, and SpecialPollInterval 64; previous
+  settings were saved. Existing phase bounds and SecureTimeSeeding were not changed. The
+  bounded startup probe at 08:07:34 UTC measured 2.07–8.77 ms offset against time.windows.com,
+  Running/Automatic service, and a recent synchronized state. Startup now checks all of these.
+- Private database/dashboard secrets exist only in restricted LocalAppData storage. Nothing
+  was copied into a repository `.env`, and no broker credentials exist from this setup.
+- All 15 opt-in PostgreSQL checks passed; actual app crash/restart and database outage/recovery
+  passed while HALTED. Native Ollama is reachable from the app container without public binding.
+- A limited current-user logon task was registered after recovery checks. Its wrapper starts
+  only expected signed local dependencies, checks clock/configuration, and uses existing images.
+  It is interactive-user logon startup, not a pre-login service; a subsequent real boot is still
+  required to demonstrate that exact logon trigger end to end.
+
+## Historical pre-reboot observations
 
 | Item | Observed state | Assessment |
 |---|---|---|

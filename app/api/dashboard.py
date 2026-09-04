@@ -18,6 +18,8 @@ from app.clock.base import Clock
 from app.config import AppConfig, RuntimeBinding
 from app.domain.enums import ExecutionEnvironment, RuntimeSafetyState, TradingMode
 from app.domain.models import AccountSnapshot, ExactApproval, TradeProposal
+from app.federal.api import create_federal_registry_router
+from app.federal.service import RegistryRepository
 from app.observability.metrics import MetricsRegistry
 from app.safety.runtime_state import SafetyController, SafetyEvidence
 
@@ -117,6 +119,7 @@ def _dashboard_html() -> str:
 <main class="grid">
 <section class="panel"><h2>System</h2><div id="system"></div></section>
 <section class="panel"><h2>Account separation</h2><div id="accounts"></div></section>
+<section class="panel"><h2>Data provenance</h2><div id="provenance"></div></section>
 <section class="panel"><h2>Candidates</h2><pre id="candidates">[]</pre></section>
 <section class="panel"><h2>Proposals</h2><pre id="proposals">[]</pre></section>
 <section class="panel"><h2>Open orders</h2><pre id="open_orders">[]</pre></section>
@@ -128,7 +131,7 @@ def _dashboard_html() -> str:
 </main><script>
 const esc=v=>String(v??'unknown').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const row=(k,v)=>`<div class="row"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`;
-async function refresh(){let s=await (await fetch('/api/state')).json(); document.querySelector('#env').textContent=s.execution_environment;document.querySelector('#backend').textContent=s.demo_backend||'LIVE BROKER';document.querySelector('#mode').textContent=s.trading_mode;document.querySelector('#safety').textContent=s.runtime_safety_state;document.querySelector('#system').innerHTML=row('Safety reason',s.safety_reason)+row('Broker',s.broker_connected)+row('Model',s.model_healthy)+row('Database',s.database_healthy)+row('Market data fresh',s.market_data_fresh)+row('Reconciled',s.reconciled)+row('Write firewall',s.external_write_firewall)+row('Last scan',s.last_scan_at);let observed=s.observed_broker_account?`${s.observed_broker_account.cash} cash / ${s.observed_broker_account.buying_power} BP`:'not connected';let effective=s.effective_account?`${s.effective_account.cash} cash / ${s.effective_account.buying_power} BP`:'not initialized';document.querySelector('#accounts').innerHTML=row('REAL BROKER OBSERVED',observed)+row('EFFECTIVE/SHADOW EXECUTION',effective);for(let id of ['candidates','proposals','open_orders','positions','qualification','errors'])document.querySelector('#'+id).textContent=JSON.stringify(s[id]??s.recent_errors,null,2);let i=await (await fetch('/api/broker-command-intents')).json();document.querySelector('#intents').textContent=JSON.stringify(i,null,2)}
+async function refresh(){try{let r=await fetch('/api/state',{signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('State unavailable');let s=await r.json();document.querySelector('#env').textContent=s.execution_environment;document.querySelector('#backend').textContent=s.demo_backend||'LIVE BROKER';document.querySelector('#mode').textContent=s.trading_mode;document.querySelector('#safety').textContent=s.runtime_safety_state;let simulated=s.demo_backend==='OFFLINE_SIM';document.querySelector('#system').innerHTML=row('Safety reason',s.safety_reason)+row(simulated?'Simulator connected':'Broker connected',s.broker_connected)+row('Model',s.model_healthy)+row('Database',s.database_healthy)+row('Market data fresh',s.market_data_fresh)+row('Reconciled',s.reconciled)+row('Write firewall',s.external_write_firewall)+row('Last scan',s.last_scan_at);let observed=s.observed_broker_account?`${s.observed_broker_account.cash} cash / ${s.observed_broker_account.buying_power} BP`:'not connected';let effective=s.effective_account?`${s.effective_account.cash} cash / ${s.effective_account.buying_power} BP`:'not initialized';document.querySelector('#accounts').innerHTML=row(simulated?'SIMULATED OBSERVATION':'REAL BROKER OBSERVED',observed)+row('EFFECTIVE/SHADOW EXECUTION',effective);let replay=s.replay||{};document.querySelector('#provenance').innerHTML=row('Data mode',simulated?'HISTORICAL REPLAY — NOT LIVE':'BROKER DATA — CHECK FRESHNESS')+row('Replay complete',replay.complete)+row('Replay time',replay.trading_clock)+row('Fixture version',replay.fixture_version)+row('Qualification sessions',s.qualification.sessions);for(let id of ['candidates','proposals','open_orders','positions','qualification','errors'])document.querySelector('#'+id).textContent=JSON.stringify(s[id]??s.recent_errors,null,2);let ir=await fetch('/api/broker-command-intents',{signal:AbortSignal.timeout(4000)});if(!ir.ok)throw Error('Audit unavailable');document.querySelector('#intents').textContent=JSON.stringify(await ir.json(),null,2)}catch(e){document.querySelector('#safety').textContent='STALE / CONNECTION FAILED';document.querySelector('#errors').textContent='Dashboard refresh failed. Displayed data may be stale; verify local service health.'}}
 async function act(path){let t=document.querySelector('#token').value;let r=await fetch(path,{method:'POST',headers:{'X-Dashboard-Token':t}});document.querySelector('#action').textContent=await r.text();await refresh()}refresh();setInterval(refresh,5000);
 </script></body></html>"""
 
@@ -142,6 +145,8 @@ def create_app(
     *,
     dashboard_token: str | None = None,
     reconcile: Callable[[], Awaitable[bool]] | None = None,
+    federal_repository: RegistryRepository | None = None,
+    reference_clock: Clock | None = None,
 ) -> FastAPI:
     application = FastAPI(title="Options Sentinel", version="0.1.0", docs_url="/api/docs")
     expected_token = dashboard_token or os.getenv("SENTRY_DASHBOARD_TOKEN", "")
@@ -153,6 +158,21 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid local control token"
             )
+
+    async def authorize_reference(x_dashboard_token: str = Header(default="")) -> None:
+        # Shared reference edits always require a token, even in a test profile
+        # that explicitly permits unauthenticated ordinary dashboard controls.
+        if not expected_token or not hmac.compare_digest(expected_token, x_dashboard_token):
+            raise HTTPException(status_code=401, detail="invalid local reference token")
+
+    if federal_repository is not None:
+        if reference_clock is None:
+            raise ValueError("shared reference registry requires an explicit wall clock")
+        application.include_router(
+            create_federal_registry_router(
+                federal_repository, reference_clock, authorize_reference
+            )
+        )
 
     async def audit(action: str, result: str) -> None:
         await repository.append(

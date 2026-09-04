@@ -75,3 +75,40 @@ target; the ordinary final `runtime` target does not include them. A source-only
 `.dockerignore` excludes credentials, virtual environments, downloads, Git
 history, and runtime evidence from both build contexts. Until this command has
 actually passed, the migration and real database checks remain unverified.
+
+## Isolated backup/restore roundtrip
+
+`test_postgres_backup_restore.py` requires the same database URL and explicit
+database-creation opt-in as the migration smoke test. It also needs `pg_dump`
+and `pg_restore` clients at least as new as the PostgreSQL server major version.
+They are discovered on `PATH`, or under an explicitly configured
+`SENTRY_TEST_PG_BIN_DIR`. A configured test without the clients fails rather
+than claiming backup verification. Database URL query options are rejected so
+the SQL driver and command-line clients cannot silently connect differently.
+
+The test creates two fresh databases named
+`sentry_restore_test_<random UUID>_source` and `_target`, tagging both with its
+exact ownership comment. The configured database is only the administrative
+connection, never the dump, restore, migration, or deletion target. The source
+receives the Alembic migration chain and one filled, synthetic offline-replay
+entry in a unique namespace. After all application pools close, `pg_dump`
+creates a custom-format archive inside the private pytest temporary directory,
+and `pg_restore --single-transaction --exit-on-error` restores the archive into
+the empty target. No operational or authenticated account data is involved.
+
+Verification compares every audit row in `shared`, `demo`, and `live`, including
+exact row IDs, append sequences, and JSON payloads, plus the Alembic revision.
+A newly constructed runtime must recover the exact ledger and its order,
+command, fill, and position identities; a subsequent append must advance the
+restored sequence. Cleanup validates the exact created database names and
+ownership comments, then uses ordinary `DROP DATABASE`, never `FORCE` or session
+termination. Unverified ownership or unexpected open sessions leave evidence
+for operator inspection instead of deleting it.
+
+Credentials are passed only in the client process environment, never command
+arguments. Unrelated broker credentials and ambient PostgreSQL service/options
+variables are excluded, password-file fallback is disabled, and raw client
+failure output is suppressed. Three local subprocess/environment cases test
+these boundaries separately from the one actual database roundtrip. This is a
+synthetic restore drill, not a verified restore of an operational backup, and
+does not establish backup retention, encryption, or recovery-time objectives.

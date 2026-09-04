@@ -7,10 +7,12 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import get_args
 
 import uvicorn
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from pydantic import BaseModel, ValidationError
 
 from app.config import LoadedConfig, load_config
 from app.demo.offline_scenario import run_offline_demo_scenario
@@ -37,6 +39,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def _upgrade_database(url: str) -> None:
     alembic = AlembicConfig("alembic.ini")
+    # Embedded migrations must not replace the application's redacting/rotating
+    # handlers or disable loggers already constructed during application imports.
+    alembic.attributes["configure_logger"] = False
     alembic.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     command.upgrade(alembic, "head")
 
@@ -92,6 +97,61 @@ async def _serve(loaded: LoadedConfig, host: str | None, port: int | None) -> No
         await runtime.close()
 
 
+def _configuration_field_names() -> set[str]:
+    fields: set[str] = set()
+    seen: set[type[BaseModel]] = set()
+    pending: list[object] = [LoadedConfig]
+    while pending:
+        annotation = pending.pop()
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            if annotation not in seen:
+                seen.add(annotation)
+                fields.update(annotation.model_fields)
+                pending.extend(field.annotation for field in annotation.model_fields.values())
+        else:
+            pending.extend(get_args(annotation))
+    return fields
+
+
+def _configuration_failure_detail(exc: ConfigurationError) -> str:
+    # These are exact static application diagnostics, never prefixes followed
+    # by user-controlled values, paths, YAML snippets, or connection strings.
+    safe_messages = {
+        "app and Demo profile backend mismatch",
+        "demo-once requires a DEMO startup profile",
+        "production migrations support only shared/demo/live schemas; "
+        "custom-schema deployment requires separately reviewed migrations",
+    }
+    message = exc.args[0] if len(exc.args) == 1 and isinstance(exc.args[0], str) else None
+    if message in safe_messages:
+        return message
+    cause: BaseException | None = exc
+    for _ in range(8):
+        if isinstance(cause, ValidationError):
+            # Pydantic's default text includes input_value and exception context.
+            # Keep only field names defined by our static model schemas. Mapping
+            # keys from user input are replaced, even if they look like names.
+            known_fields = _configuration_field_names()
+            issues = cause.errors(include_url=False, include_context=False, include_input=False)
+            fields = sorted(
+                {
+                    ".".join(
+                        str(part) if part in known_fields else "[item]"
+                        for part in issue["loc"]
+                    ) or "[configuration]"
+                    for issue in issues
+                }
+            )
+            return (
+                f"Configuration validation failed ({len(issues)} issues); "
+                f"fields: {', '.join(fields[:10])}. Input values are suppressed."
+            )
+        cause = cause.__cause__ if cause else None
+        if cause is None:
+            break
+    return "Configuration rejected. Check the configuration files; input values are suppressed."
+
+
 def cli(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
@@ -115,10 +175,29 @@ def cli(argv: Sequence[str] | None = None) -> int:
             asyncio.run(_serve(loaded, arguments.host, arguments.port))
             return 0
     except ConfigurationError as exc:
-        print(json.dumps({"error": "configuration", "detail": str(exc)}), file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "error": "configuration",
+                    "exception_type": type(exc).__name__,
+                    "detail": _configuration_failure_detail(exc),
+                }
+            ),
+            file=sys.stderr,
+        )
         return 2
     except Exception as exc:
-        print(json.dumps({"error": type(exc).__name__, "detail": str(exc)}), file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "error": type(exc).__name__,
+                    "detail": (
+                        "Command failed; exception details suppressed to protect credentials."
+                    ),
+                }
+            ),
+            file=sys.stderr,
+        )
         return 1
     return 1
 

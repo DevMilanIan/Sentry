@@ -39,7 +39,24 @@ VPN may be configured separately; no public inbound port is required. Keep Windo
 endpoint protection enabled.
 
 Compose requires `POSTGRES_PASSWORD`; there is no built-in production password fallback.
-Generate a long URL-safe random value and a separate dashboard token in ignored `.env`.
+For Windows setup, `scripts/windows/Initialize-LocalEnvironment.ps1` generates independent
+256-bit URL-safe hex credentials in `%LOCALAPPDATA%\OptionsSentinel\runtime.env`, outside
+OneDrive and the repository. It protects the directory before writing, disables inherited
+ACLs, and permits only the current SID, SYSTEM, and local Administrators. The file is created
+with `CreateNew` and never overwrites an existing file. Repeated runs validate existing ACLs,
+credential format, and the exact DEMO/OFFLINE_SIM/RESEARCH settings; invalid existing files
+fail without printing their contents. An interrupted partial file requires deliberate operator
+inspection and repair, not automatic replacement. LIVE authorization remains blank.
+
+`Start-Sentinel.ps1` validates that private file, supplies it to both Compose `--env-file`
+interpolation and `SENTRY_ENV_FILE`/`env_file`, and temporarily removes inherited runtime
+environment overrides so database credentials cannot diverge. Direct Compose invocations must
+set `SENTRY_ENV_FILE` to the same absolute path passed to `--env-file`. The Compose `.env`
+fallback is for nonsynced local deployments; this OneDrive checkout must not contain secrets,
+even in ignored files. Do not run `docker compose config`, inspect container environment
+values, or print the private file in captured terminals: those commands can reveal credentials.
+`docker compose config --quiet` validates configuration without rendering it.
+
 Do not use the example placeholders. The local control API requires its token, but read-only
 dashboard/API state is intended for the same trusted localhost user, not public hosting.
 Logs recursively redact credential-named fields and URL/bearer credential patterns; arbitrary

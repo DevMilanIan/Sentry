@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[a-zA-Z0-9-]{1,64}$')]
     [string]$RunId,
-    [ValidateSet('Reliability', 'Platform', 'WslUpdate')]
+    [ValidateSet('Reliability', 'Platform', 'WslUpdate', 'ClockAccuracy')]
     [string[]]$Components = @('Reliability', 'Platform')
 )
 
@@ -21,6 +21,7 @@ $taskStatus = [ordered]@{
     reliability = 'pending'
     platform = 'pending'
     wsl_update = 'not_requested'
+    clock_accuracy = 'not_requested'
     errors = @()
 }
 
@@ -34,7 +35,8 @@ try {
     $taskSteps = @(
         @{ Name = 'reliability'; Script = 'Configure-Reliability.ps1' },
         @{ Name = 'platform'; Script = 'Enable-Platform.ps1' },
-        @{ Name = 'wsl_update'; Script = 'Update-Wsl.ps1'; Component = 'WslUpdate' }
+        @{ Name = 'wsl_update'; Script = 'Update-Wsl.ps1'; Component = 'WslUpdate' },
+        @{ Name = 'clock_accuracy'; Script = 'Configure-ClockAccuracy.ps1'; Component = 'ClockAccuracy' }
     )
     foreach ($taskStep in $taskSteps) {
         $taskComponent = if ($taskStep.Component) { $taskStep.Component } else { $taskStep.Name }

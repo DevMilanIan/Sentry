@@ -164,3 +164,39 @@ the following original remaining-work list predates the late-evening installs.
   setup scripts parsed. No `.env`, database credentials, broker credentials, native database,
   running container stack, or startup task was created. `SETUP_RESUME.md` contains exact paths
   and remaining post-reboot checks. No brokerage or trading authority changed.
+
+## 2026-09-04 — Post-reboot deployment and actual recovery
+
+- Confirmed completed reboot. Initialized Ubuntu 24.04 under WSL2, created the locked-password
+  non-sudo local user `sentinel`, and selected it as distribution default. Docker Desktop's
+  Linux engine runs; no second Docker engine was installed inside Ubuntu.
+- Initial postboot Windows Time offset was approximately 744 ms despite service readiness.
+  Used the authorized normal UAC flow to set bounded high-accuracy polling/correction values,
+  retaining previous settings in ignored local evidence. No phase-safety bounds, firewall, or
+  security protections were disabled. Actual offsets improved to 13–22 ms, then 2–9 ms.
+- Created independent 256-bit database/dashboard secrets under restricted LocalAppData NTFS
+  storage, not the OneDrive repository. Existing values are preserved and never printed.
+  Fixed PowerShell 7.6/.NET null-environment removal: a present empty value overrides Compose's
+  private env file, so the launcher now uses actual environment-variable deletion and restores
+  absent/empty/nonempty prior values distinctly.
+- Actual PostgreSQL verification: 15 checks passed, including fresh/repeated Alembic migrations,
+  transaction/isolation/uniqueness cases, durable runtime restart, and real custom-format
+  pg_dump/pg_restore with exact filled-ledger/journal comparison in owned disposable databases.
+  Deployed database remains on its own named volume, with no published host database port.
+- Started the actual offline application at `127.0.0.1:8000`; database and native Ollama health
+  passed. Finite replay completed at sequence 5 with fixture hash
+  `726d119cb2b6563828eb59f734fd461ffada80eb78d4bef3dc3b9f2a567042dc` and simulated cash $25.
+  It remains DEMO/OFFLINE_SIM/RESEARCH/HALTED, with no external-write authority and no positions.
+- Actual app SIGKILL/restart preserved that exact cursor/hash/cash and reconciled successfully.
+  A controlled database stop was detected after 14 seconds; HALTED remained active. Restored
+  PostgreSQL in a finally block, then used authenticated local reconciliation to clear the
+  offline persistence latch. Trading was not resumed; historical incident errors are retained.
+- Full Linux testing exposed Alembic `fileConfig` disabling existing notification loggers and
+  replacing application handlers. Embedded migrations now preserve logging; CLI Alembic keeps
+  existing loggers enabled. Regression checks verify handler continuity across real migrations.
+  Follow-up full container run: 484 passed, 20 host-specific cases skipped (Windows DPAPI and
+  PowerShell parser cases), one third-party Starlette/AnyIO deprecation warning. Further new
+  safety/startup changes below require their own final aggregate verification.
+- This is an offline deployment/recovery milestone, not V1 or full-project completion. No
+  Robinhood OAuth, real market/account connection, broker-shadow session, funding, or real trade
+  has occurred. Runtime/source/federal/evaluation composition gaps and future user gates remain.

@@ -5,6 +5,8 @@
 !Dockerfile
 !.dockerignore
 !pyproject.toml
+!requirements/
+!requirements/container-constraints.txt
 !README.md
 !alembic.ini
 !app/
@@ -15,6 +17,10 @@
 !migrations/**
 !tests/
 !tests/**
+!docker-compose.yml
+!scripts/
+!scripts/windows/
+!scripts/windows/*.ps1
 **/__pycache__/
 **/*.pyc
 **/*.pyo
