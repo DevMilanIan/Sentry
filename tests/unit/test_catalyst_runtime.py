@@ -10,10 +10,16 @@ from app.catalysts.collector import (
     OfficialSourceCollector,
     deduplicate_documents,
 )
+from app.catalysts.entity_mapping import EntityMappingStatus, ExplicitIssuerMapper
 from app.catalysts.models import SourceDocument
 from app.catalysts.runtime import CatalystIngestionWorker
 from app.clock.base import VirtualClock
-from app.config import OfficialSourceConfig, RuntimeBinding, SourcesConfig
+from app.config import (
+    IssuerAliasMappingConfig,
+    OfficialSourceConfig,
+    RuntimeBinding,
+    SourcesConfig,
+)
 from app.db.repository import InMemoryAuditRepository
 from app.domain.enums import DemoBackend
 from app.exceptions import DataInvalidError, SafetyCriticalError
@@ -94,9 +100,7 @@ async def test_document_to_event_crash_gap_is_repaired_without_new_document(
     assert len(await audit.list("source_documents")) == 1
     assert not await audit.list("sentinel_events")
     audit.fail_event = False
-    restarted, _, _ = setup_worker(
-        clock, demo_binding, b"<rss><channel/></rss>", repository=audit
-    )
+    restarted, _, _ = setup_worker(clock, demo_binding, b"<rss><channel/></rss>", repository=audit)
     await restarted.poll()  # The item is no longer present in the remote feed.
     assert len(await audit.list("source_documents")) == 1
     assert len(await audit.list("sentinel_events")) == 1
@@ -179,6 +183,49 @@ def test_dedup_preserves_revisions_and_primary_source_corroboration(instant: dat
     assert [doc.deduplication_key for doc in expected] == [
         doc.deduplication_key for doc in permuted
     ]
+
+
+def test_literal_issuer_mapping_selects_one_ticker_and_rejects_multi_issuer_release(
+    instant: datetime,
+) -> None:
+    config = SourcesConfig(
+        version="issuer-map-test-v1",
+        sec_user_agent="OptionsSentinel fixture",
+        poll_seconds=900,
+        official_sources=(
+            OfficialSourceConfig(id="agency", url="https://agency.gov/feed", enabled=True),
+        ),
+        issuer_mappings=(
+            IssuerAliasMappingConfig(
+                mapping_id="acme-industries",
+                ticker="ACME",
+                issuer_name="Acme Industries",
+                aliases=("Acme Industries",),
+                source_ids=("agency",),
+                provenance_url="https://agency.gov/issuer/acme",
+            ),
+            IssuerAliasMappingConfig(
+                mapping_id="beta-systems",
+                ticker="BETA",
+                issuer_name="Beta Systems",
+                aliases=("Beta Systems",),
+                source_ids=("agency",),
+                provenance_url="https://agency.gov/issuer/beta",
+            ),
+        ),
+    )
+    base = FeedDocumentParser().parse("agency", FEED, instant)[0]
+    mapper = ExplicitIssuerMapper(config)
+    mapped = mapper.map(base.model_copy(update={"title": "Program notice for Acme Industries"}))
+    ambiguous = mapper.map(
+        base.model_copy(update={"title": "Joint notice for Acme Industries and Beta Systems"})
+    )
+    assert mapped.status is EntityMappingStatus.MAPPED and mapped.mapped_ticker == "ACME"
+    assert mapped.matches[0].mapping_id == "acme-industries"
+    assert mapped.mapping_config_version == config.version
+    assert ambiguous.status is EntityMappingStatus.AMBIGUOUS
+    assert ambiguous.mapped_ticker is None
+    assert {match.ticker for match in ambiguous.matches} == {"ACME", "BETA"}
 
 
 def test_xml_entities_are_rejected_as_data_errors(instant: datetime) -> None:

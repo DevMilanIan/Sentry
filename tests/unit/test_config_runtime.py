@@ -52,7 +52,8 @@ def test_enabled_official_sources_match_verified_public_feed_checkpoint() -> Non
     sources = SourcesConfig.model_validate(
         yaml.safe_load(Path("config/sources.yaml").read_text(encoding="utf-8"))
     )
-    assert sources.version == "sources-v3-verified-public-agency-feeds"
+    assert sources.version == "sources-v4-explicit-issuer-mapping"
+    assert sources.issuer_mappings == ()
     assert {source.id: source.url for source in sources.official_sources if source.enabled} == {
         "federal_reserve": "https://www.federalreserve.gov/feeds/press_all.xml",
         "ftc": "https://www.ftc.gov/feeds/press-release.xml",

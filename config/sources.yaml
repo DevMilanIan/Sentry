@@ -1,4 +1,4 @@
-version: sources-v3-verified-public-agency-feeds
+version: sources-v4-explicit-issuer-mapping
 sec_user_agent: OptionsSentinel local-research contact-required@example.invalid
 poll_seconds: 900
 official_sources:
@@ -34,3 +34,7 @@ official_sources:
   - id: eia_releases
     url: https://www.eia.gov/about/new/WNtest3.php
     enabled: true
+
+# Intentionally empty until the operator verifies an issuer identity and adds an
+# exact alias with provenance. Feed text never creates a ticker association by itself.
+issuer_mappings: []

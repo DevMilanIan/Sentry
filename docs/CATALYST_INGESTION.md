@@ -19,8 +19,31 @@ not claimed exactly-once; stable document/event identities preserve correlations
 Deduplication is deterministic. It retains conflicting revisions at one URL and corroborating
 text from independent sources instead of randomly selecting a revision by generated UUID.
 Unknown, future, and older-than-seven-day publication dates are retained for inspection but do
-not emit current-catalyst events. Event availability is the observed fetch time, not the earlier
-publication time. No ticker associations or market significance are guessed from a headline.
+not emit current-catalyst events. Event availability is the mapping evaluation/fetch time, not the
+earlier publication time.
+
+## Explicit issuer mapping
+
+`sources.yaml` contains a versioned `issuer_mappings` list. It is intentionally empty in the
+shipped configuration: no company assertion or ticker is seeded. An operator may add a stable
+mapping ID, ticker, issuer name, one or more literal issuer aliases, allowed source IDs, and a
+credential-free HTTPS provenance URL, then increment the source-config version and restart.
+`surveillance_priority` on each source is an attention-allocation value, not a claim that a
+particular release is material.
+
+The mapper performs only case-folded, punctuation-normalized contiguous matching of those
+configured literal aliases. It does not discover capitalized words, parse ticker-like strings, run
+an NLP model, or infer a symbol. Aliases are source-scoped, and configuration rejects one alias
+assigned to different tickers for the same source. If a document names aliases for multiple
+tickers, its event is retained with `AMBIGUOUS` mapping evidence and no ticker; it cannot enter the
+single-symbol candidate path by arbitrary selection. A no-match event is likewise tickerless.
+
+Raw `source_documents` remain unchanged and tickerless. Each sentinel event stores the exact
+mapping outcome, mapping/source-config digest, mapping ID, matched literal alias, issuer/ticker,
+and mapping provenance. Event identity incorporates that digest, so a deliberate versioned mapping
+change can reclassify a retained recent document without backdating when the classification became
+known. Candidate research reconstructs the decision from the current config and rejects stale,
+forged, or inconsistent mapping payloads.
 
 The worker is registered only outside `OFFLINE_SIM`. Replay workers do not poll current feeds;
 candidate source facts additionally separate live-read evidence from fixture/replay evidence.
@@ -75,9 +98,10 @@ Other coverage remains explicitly incomplete:
   because a real identifying contact is required; no request used the placeholder address.
   SEC press releases would not constitute an EDGAR filings adapter.
 
-EDGAR submissions, company investor-relations sources, verified entity mapping, and complete
-downstream current-market consumption remain unfinished. These public reads do not constitute
-complete master-task source coverage or a verified continuous catalyst surveillance service.
+EDGAR submissions, company investor-relations sources, populated operator-verified issuer
+mappings, and complete downstream current-market consumption remain unfinished. These public
+reads do not constitute complete master-task source coverage or a verified continuous catalyst
+surveillance service.
 
 Mocked tests cover disabled sources, malformed items, bounded trickling responses, unsafe XML,
 URL/timestamp provenance, retained revisions, restart deduplication, rolled-feed crash recovery,

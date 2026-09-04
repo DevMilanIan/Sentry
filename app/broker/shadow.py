@@ -5,7 +5,10 @@ import inspect
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
+
+from pydantic import Field
 
 from app.broker.base import (
     BrokerCapabilities,
@@ -39,15 +42,87 @@ from app.domain.models import (
     OptionContract,
     OptionQuote,
     Position,
+    TimestampedModel,
     TradeProposal,
+    sha256_json,
 )
 from app.exceptions import SafetyCriticalError, SentinelError
 from app.safety.write_firewall import DenyAllWriteFirewall
 
 ShadowLedgerStateRecorder = Callable[[LedgerSnapshot], Awaitable[None] | None]
+ShadowReviewRecorder = Callable[["BrokerShadowReviewEvidence"], Awaitable[None] | None]
 _TERMINAL_ORDER_STATES = frozenset(
     {OrderState.FILLED, OrderState.CANCELED, OrderState.REJECTED, OrderState.EXPIRED}
 )
+
+
+class BrokerShadowReviewEvidence(TimestampedModel):
+    """Distinct, durable evidence for one local and broker-observed review pair."""
+
+    record_kind: Literal["broker_shadow_review_evidence_v1"] = (
+        "broker_shadow_review_evidence_v1"
+    )
+    environment: Literal["DEMO"] = "DEMO"
+    namespace: str = Field(min_length=1)
+    proposal_id: UUID
+    combined_review_id: UUID
+    shadow_review: BrokerReview
+    broker_observed_review: BrokerReview | None
+    broker_review_status: Literal["AVAILABLE", "UNAVAILABLE"]
+    broker_error_type: str | None = None
+    observed_state_before_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    observed_state_after_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    observed_state_unchanged: bool = False
+
+
+def _observed_state_hash(
+    account: AccountSnapshot,
+    positions: tuple[Position, ...],
+    orders: tuple[BrokerOrder, ...],
+) -> str:
+    """Hash stable economic/order state while ignoring read timestamps and local parse IDs."""
+
+    position_state = sorted(
+        (
+            {
+                "instrument_id": item.contract.instrument_id,
+                "contract": item.contract.model_dump(mode="json"),
+                "quantity": item.quantity,
+                "average_entry_price": str(item.average_entry_price),
+                "realized_pnl": str(item.realized_pnl),
+            }
+            for item in positions
+        ),
+        key=lambda item: (item["instrument_id"], sha256_json(item)),
+    )
+    order_state = sorted(
+        (
+            {
+                "broker_order_id": item.broker_order_id,
+                "contract": item.contract.model_dump(mode="json"),
+                "side": item.side.value,
+                "quantity": item.quantity,
+                "filled_quantity": item.filled_quantity,
+                "limit_price": str(item.limit_price),
+                "average_fill_price": (
+                    str(item.average_fill_price) if item.average_fill_price is not None else None
+                ),
+                "state": item.state.value,
+                "submitted_at": item.submitted_at,
+            }
+            for item in orders
+        ),
+        key=lambda item: (str(item["broker_order_id"]), sha256_json(item)),
+    )
+    return sha256_json(
+        {
+            "account": account.model_dump(
+                mode="json", exclude={"snapshot_id", "created_at", "as_of"}
+            ),
+            "positions": position_state,
+            "orders": order_state,
+        }
+    )
 
 
 class RobinhoodShadowBroker(IntentRecordingBroker):
@@ -75,6 +150,7 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         command_recorder: CommandIntentRecorder | None = None,
         meaningful_external_balance: Decimal = Decimal("0"),
         state_recorder: ShadowLedgerStateRecorder | None = None,
+        review_recorder: ShadowReviewRecorder | None = None,
         initial_state: LedgerSnapshot | None = None,
         expected_account_fingerprint: str | None = None,
         acknowledged_historical_order_ids: frozenset[str] = frozenset(),
@@ -95,6 +171,7 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         self._firewall = selected_firewall
         self._meaningful_external_balance = meaningful_external_balance
         self._state_recorder = state_recorder
+        self._review_recorder = review_recorder
         self._state_dirty = False
         self._expected_account_fingerprint = expected_account_fingerprint
         self._historical_order_ids = frozenset(acknowledged_historical_order_ids)
@@ -113,6 +190,7 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         self._capabilities: BrokerCapabilities | None = None
         self._last_broker_review: BrokerReview | None = None
         self._last_shadow_review: BrokerReview | None = None
+        self._last_review_evidence: BrokerShadowReviewEvidence | None = None
 
     @property
     def ledger(self) -> ShadowLedger:
@@ -210,6 +288,10 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
     def last_shadow_execution_review(self) -> BrokerReview | None:
         return self._last_shadow_review
 
+    @property
+    def last_review_evidence(self) -> BrokerShadowReviewEvidence | None:
+        return self._last_review_evidence
+
     async def get_capabilities(self) -> BrokerCapabilities:
         discovered = await self._read_client.get_capabilities()
         issues = list(discovered.issues)
@@ -273,14 +355,32 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
             self._last_shadow_review = shadow_review
 
         broker_review: BrokerReview | None = None
-        broker_error: str | None = None
+        broker_error_type: str | None = None
+        before_hash: str | None = None
+        after_hash: str | None = None
         try:
+            before = await asyncio.gather(
+                self.get_observed_broker_account_state(),
+                self.get_observed_broker_positions(),
+                self.get_observed_broker_orders(),
+            )
+            before_hash = _observed_state_hash(before[0], before[1], before[2])
             broker_review = await self._read_client.review_option_order(proposal)
+            after = await asyncio.gather(
+                self.get_observed_broker_account_state(),
+                self.get_observed_broker_positions(),
+                self.get_observed_broker_orders(),
+            )
+            after_hash = _observed_state_hash(after[0], after[1], after[2])
         except SentinelError as exc:
-            # Read/review connectivity is measured separately; it never changes
-            # the real-write denial.  The combined review records the outage.
-            broker_error = f"{type(exc).__name__}: {exc}"
+            # Keep error detail out of qualification rows; the exception class is
+            # sufficient to distinguish connectivity/schema/auth failures.
+            broker_error_type = type(exc).__name__
         self._last_broker_review = broker_review
+
+        observed_state_unchanged = (
+            before_hash is not None and after_hash is not None and before_hash == after_hash
+        )
 
         warnings = [f"shadow: {item}" for item in shadow_review.warnings]
         if broker_review is not None:
@@ -289,22 +389,68 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
                 warnings.append(
                     "broker-observed review rejected; shadow acceptance remains separate"
                 )
-        elif broker_error is not None:
-            warnings.append(f"broker-observed review unavailable: {broker_error}")
+            if not broker_review.side_effect_free:
+                warnings.append("broker-observed review did not assert a side-effect-free result")
+        elif broker_error_type is not None:
+            warnings.append(f"broker-observed review unavailable: {broker_error_type}")
+        if not observed_state_unchanged:
+            warnings.append("broker-observed state was not proven unchanged across review")
         reference = (
             f"shadow={shadow_review.review_id};broker={broker_review.review_id}"
             if broker_review is not None
             else f"shadow={shadow_review.review_id};broker=unavailable"
         )
-        return BrokerReview(
+        combined = BrokerReview(
             created_at=self._clock.now(),
             environment=ExecutionEnvironment.DEMO,
             proposal_id=proposal.proposal_id,
-            accepted=shadow_review.accepted,
+            accepted=(
+                shadow_review.accepted
+                and broker_review is not None
+                and broker_review.side_effect_free
+                and observed_state_unchanged
+            ),
             warnings=tuple(warnings),
             raw_reference=reference,
-            side_effect_free=True,
+            side_effect_free=(
+                broker_review is not None
+                and broker_review.side_effect_free
+                and observed_state_unchanged
+            ),
         )
+        if self._review_recorder is not None:
+            evidence = BrokerShadowReviewEvidence(
+                created_at=self._clock.now(),
+                namespace=self._namespace,
+                proposal_id=proposal.proposal_id,
+                combined_review_id=combined.review_id,
+                shadow_review=shadow_review,
+                broker_observed_review=broker_review,
+                broker_review_status="AVAILABLE" if broker_review is not None else "UNAVAILABLE",
+                broker_error_type=broker_error_type,
+                observed_state_before_hash=before_hash,
+                observed_state_after_hash=after_hash,
+                observed_state_unchanged=observed_state_unchanged,
+            )
+            self._last_review_evidence = evidence
+            recorded = self._review_recorder(evidence)
+            if inspect.isawaitable(recorded):
+                await recorded
+        else:
+            self._last_review_evidence = BrokerShadowReviewEvidence(
+                created_at=self._clock.now(),
+                namespace=self._namespace,
+                proposal_id=proposal.proposal_id,
+                combined_review_id=combined.review_id,
+                shadow_review=shadow_review,
+                broker_observed_review=broker_review,
+                broker_review_status="AVAILABLE" if broker_review is not None else "UNAVAILABLE",
+                broker_error_type=broker_error_type,
+                observed_state_before_hash=before_hash,
+                observed_state_after_hash=after_hash,
+                observed_state_unchanged=observed_state_unchanged,
+            )
+        return combined
 
     async def place_option_order(
         self,

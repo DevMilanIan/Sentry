@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import inspect
+from collections.abc import Awaitable, Callable
 
 from app.clock.base import Clock
 from app.domain.enums import ExecutionEnvironment, FirewallDisposition
 from app.domain.models import BrokerCommandIntent, FirewallDecision
 from app.exceptions import SafetyCriticalError
 
-FirewallRecorder = Callable[[FirewallDecision], None]
+FirewallRecorder = Callable[[FirewallDecision], Awaitable[None] | None]
 
 
 class DenyAllWriteFirewall:
@@ -35,7 +36,9 @@ class DenyAllWriteFirewall:
             transmitted=False,
         )
         if self._recorder:
-            self._recorder(decision)
+            recorded = self._recorder(decision)
+            if inspect.isawaitable(recorded):
+                await recorded
         return decision
 
 
@@ -69,5 +72,7 @@ class LiveWriteAuthorizer:
                 transmitted=False,
             )
         if self._recorder:
-            self._recorder(decision)
+            recorded = self._recorder(decision)
+            if inspect.isawaitable(recorded):
+                await recorded
         return decision

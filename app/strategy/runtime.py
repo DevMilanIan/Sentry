@@ -10,6 +10,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, Field
 
+from app.catalysts.entity_mapping import (
+    EntityMappingStatus,
+    ExplicitIssuerMapper,
+    SourceEntityMapping,
+)
 from app.catalysts.models import SourceDocument
 from app.clock.base import Clock
 from app.config import LoadedConfig, RuntimeBinding
@@ -30,6 +35,7 @@ from app.domain.models import (
     sha256_json,
 )
 from app.exceptions import DataInvalidError, SafetyCriticalError
+from app.federal.service import FederalRegistryService
 from app.market.base import MarketDataProvider
 from app.market.models import PriceBar
 from app.options.selector import ContractSelector, ContractSelectorConfig
@@ -58,6 +64,7 @@ class CandidateWorkerLimits(DomainModel):
     maximum_bars: int = Field(default=1_000, ge=2, le=10_000)
     maximum_source_documents: int = Field(default=4, ge=1, le=20)
     maximum_source_characters: int = Field(default=2_000, ge=100, le=10_000)
+    maximum_federal_relationships: int = Field(default=16, ge=1, le=64)
     bar_timeframe: str = "5m"
     bar_lookback_seconds: int = Field(default=86_400, gt=0)
     minimum_momentum_percent: Decimal = Field(default=Decimal("0.5"), gt=0)
@@ -72,6 +79,9 @@ class CandidateInputs(DomainModel):
     previous: EquityQuote | None
     bars: tuple[PriceBar, ...]
     verified_source_facts: tuple[CandidateFact, ...]
+    official_source_priority: Decimal | None = Field(default=None, ge=0, le=100)
+    federal_registry_facts: tuple[CandidateFact, ...] = ()
+    federal_exposure_score: Decimal | None = Field(default=None, ge=0, le=100)
 
 
 class CandidateFeatureSet(DomainModel):
@@ -168,6 +178,7 @@ class CandidateResearchWorker:
         policy_name: str = "DEMO_EXPLORATORY",
         selector: ContractSelector | None = None,
         feature_provider: FeatureProvider | None = None,
+        federal_registry: FederalRegistryService | None = None,
         limits: CandidateWorkerLimits | None = None,
         run_id: UUID | None = None,
     ) -> None:
@@ -188,6 +199,9 @@ class CandidateResearchWorker:
         self.policy_profile, self.policy_name = policy_profile, policy_name
         self.limits = limits or CandidateWorkerLimits()
         self.feature_provider = feature_provider
+        self.federal_registry = federal_registry
+        if federal_registry is not None and federal_registry.repository.binding != self.binding:
+            raise SafetyCriticalError("candidate worker federal registry binding mismatch")
         self.run_id = run_id
         self._lock = asyncio.Lock()
         strategy = loaded.strategy
@@ -300,7 +314,8 @@ class CandidateResearchWorker:
             self._available(bar.ends_at, cutoff)
             if bar.symbol.upper() != symbol or bar.timeframe != self.limits.bar_timeframe:
                 raise DataInvalidError("market returned an unrelated bar")
-        source_facts = await self._source_facts(event, symbol, cutoff)
+        source_facts, source_priority = await self._source_facts(event, symbol, cutoff)
+        federal_facts, federal_score = await self._federal_facts(symbol, cutoff)
         inputs = CandidateInputs(
             event=event,
             symbol=symbol,
@@ -308,12 +323,19 @@ class CandidateResearchWorker:
             previous=previous,
             bars=tuple(sorted(bars, key=lambda bar: bar.ends_at)[-2:]),
             verified_source_facts=source_facts,
+            official_source_priority=source_priority,
+            federal_registry_facts=federal_facts,
+            federal_exposure_score=federal_score,
         )
         features, changed = self._measured_features(inputs)
         if not changed and not source_facts:
             return None, "no_measurable_change_or_verified_source"
         if self.feature_provider is not None:
             additional = await self.feature_provider(inputs)
+            if "federal_exposure" in additional.surveillance:
+                raise DataInvalidError(
+                    "federal exposure is reserved for the verified reference registry"
+                )
             features = CandidateFeatureSet(
                 facts=(*features.facts, *additional.facts),
                 surveillance={**features.surveillance, **additional.surveillance},
@@ -459,6 +481,7 @@ class CandidateResearchWorker:
         quote, previous = inputs.current, inputs.previous
         facts = [self._fact("underlying_quote", quote.model_dump(mode="json"), quote)]
         facts.extend(inputs.verified_source_facts)
+        facts.extend(inputs.federal_registry_facts)
         surveillance: dict[str, Decimal] = {}
         quality: dict[str, Decimal] = {}
         references: dict[str, tuple[str, ...]] = {}
@@ -536,6 +559,22 @@ class CandidateResearchWorker:
                 quote.last * quote.volume / self.limits.full_scale_observed_dollar_volume * 100,
             )
             references["surveillance:underlying_liquidity"] = ("underlying_quote",)
+        if (
+            inputs.official_source_priority is not None
+            and "catalyst_priority" in self.surveillance.weights.weights
+        ):
+            surveillance["catalyst_priority"] = inputs.official_source_priority
+            references["surveillance:catalyst_priority"] = tuple(
+                fact.fact_id for fact in inputs.verified_source_facts
+            )
+        if (
+            inputs.federal_exposure_score is not None
+            and "federal_exposure" in self.surveillance.weights.weights
+        ):
+            surveillance["federal_exposure"] = inputs.federal_exposure_score
+            references["surveillance:federal_exposure"] = tuple(
+                fact.fact_id for fact in inputs.federal_registry_facts
+            )
         return CandidateFeatureSet(
             facts=tuple(facts),
             surveillance=surveillance,
@@ -574,9 +613,10 @@ class CandidateResearchWorker:
 
     async def _source_facts(
         self, event: SentinelEvent, symbol: str, cutoff: datetime
-    ) -> tuple[CandidateFact, ...]:
-        configured = {source.id: source.url for source in self.loaded.sources.official_sources}
+    ) -> tuple[tuple[CandidateFact, ...], Decimal | None]:
+        configured = {source.id: source for source in self.loaded.sources.official_sources}
         facts: list[CandidateFact] = []
+        priorities: list[Decimal] = []
         for reference in event.raw_reference_ids[: self.limits.maximum_source_documents]:
             row = await self.repository.find_payload("source_documents", "document_id", reference)
             if row is None:
@@ -587,11 +627,36 @@ class CandidateResearchWorker:
                     continue
             elif document.data_mode != "LIVE_READ":
                 continue
-            base = configured.get(document.source_id)
-            if base is None or symbol not in {ticker.upper() for ticker in document.tickers}:
+            source = configured.get(document.source_id)
+            if source is None:
                 continue
+            mapping_payload: dict[str, Any] | None = None
+            observed_at = document.fetched_at
+            if self.binding.demo_backend is DemoBackend.OFFLINE_SIM:
+                if symbol not in {ticker.upper() for ticker in document.tickers}:
+                    continue
+            else:
+                raw_mapping = event.payload.get("entity_mapping")
+                try:
+                    mapping = SourceEntityMapping.model_validate(raw_mapping)
+                except Exception as exc:
+                    raise DataInvalidError(
+                        "official-source event lacks valid explicit entity mapping"
+                    ) from exc
+                expected = ExplicitIssuerMapper(self.loaded.sources).map(document)
+                if (
+                    mapping != expected
+                    or mapping.status is not EntityMappingStatus.MAPPED
+                    or mapping.mapped_ticker != symbol
+                    or event.tickers != (symbol,)
+                ):
+                    raise DataInvalidError(
+                        "official-source entity mapping is ambiguous, stale, or inconsistent"
+                    )
+                mapping_payload = mapping.model_dump(mode="json")
+                observed_at = event.created_at
             url = urlsplit(document.canonical_url)
-            if url.scheme != "https" or url.hostname != urlsplit(base).hostname:
+            if url.scheme != "https" or url.hostname != urlsplit(source.url).hostname:
                 continue
             effective = document.publication_time or document.fetched_at
             self._available(effective, cutoff)
@@ -606,13 +671,69 @@ class CandidateResearchWorker:
                         ],
                         "url": document.canonical_url,
                         "content_hash": document.content_hash,
+                        "source_config_version": self.loaded.sources.version,
+                        "source_priority": str(source.surveillance_priority),
+                        "entity_mapping": mapping_payload,
                     },
                     source_id=str(document.document_id),
                     effective_at=effective,
-                    observed_at=document.fetched_at,
+                    observed_at=observed_at,
                 )
             )
-        return tuple(facts)
+            priorities.append(source.surveillance_priority)
+        return tuple(facts), max(priorities) if priorities else None
+
+    async def _federal_facts(
+        self, symbol: str, cutoff: datetime
+    ) -> tuple[tuple[CandidateFact, ...], Decimal | None]:
+        if self.federal_registry is None:
+            return (), None
+        page = await self.federal_registry.snapshot(
+            as_of=cutoff,
+            ticker=symbol,
+            limit=self.limits.maximum_federal_relationships,
+        )
+        if page.total_relationships > self.limits.maximum_federal_relationships:
+            raise DataInvalidError("federal registry candidate fact budget exceeded")
+        scored = await self.federal_registry.score(symbol, as_of=cutoff)
+        item_ids = {item.revision.relationship_id for item in page.items}
+        if item_ids != set(scored.included_relationship_ids) | set(
+            scored.excluded_relationship_ids
+        ):
+            raise DataInvalidError("federal registry score and causal snapshot disagree")
+        relationship_facts = tuple(
+            CandidateFact(
+                fact_id=(
+                    f"federal:relationship:{item.revision.relationship_id}:"
+                    f"{item.revision.revision_id}"
+                ),
+                value={
+                    "relationship": item.revision.relationship.model_dump(mode="json"),
+                    "revision_id": str(item.revision.revision_id),
+                    "revision_hash": item.revision.revision_hash,
+                    "evidence_status": item.evidence_status.value,
+                    "eligible_for_research_score": item.eligible_for_research_score,
+                },
+                source_id=(
+                    f"federal-registry:{item.revision.relationship_id}:{item.revision.revision_id}"
+                ),
+                effective_at=item.revision.created_at,
+                observed_at=item.revision.created_at,
+            )
+            for item in page.items
+            if item.eligible_for_research_score
+        )
+        aggregate = CandidateFact(
+            fact_id=f"federal:score:{symbol}",
+            value={
+                **scored.model_dump(mode="json"),
+                "relationship_fact_ids": [fact.fact_id for fact in relationship_facts],
+            },
+            source_id=f"federal-registry:{scored.policy_version}:{scored.score.version}",
+            effective_at=cutoff,
+            observed_at=cutoff,
+        )
+        return (aggregate, *relationship_facts), scored.score.value
 
     def _available(self, value: datetime, cutoff: datetime) -> None:
         if value.tzinfo is None or value.utcoffset() is None or value > cutoff:

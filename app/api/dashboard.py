@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
@@ -16,11 +16,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.clock.base import Clock
 from app.config import AppConfig, RuntimeBinding
-from app.domain.enums import ExecutionEnvironment, RuntimeSafetyState, TradingMode
+from app.domain.enums import DemoBackend, ExecutionEnvironment, RuntimeSafetyState, TradingMode
 from app.domain.models import AccountSnapshot, ExactApproval, TradeProposal
 from app.federal.api import create_federal_registry_router
 from app.federal.service import RegistryRepository
 from app.observability.metrics import MetricsRegistry
+from app.qualification.service import (
+    BrokerShadowQualificationService,
+    QualificationRepository,
+)
 from app.safety.runtime_state import SafetyController, SafetyEvidence
 
 
@@ -55,7 +59,11 @@ class RuntimeView:
     positions: list[dict[str, Any]] = field(default_factory=list)
     recent_errors: deque[str] = field(default_factory=lambda: deque(maxlen=100))
     qualification: dict[str, Any] = field(
-        default_factory=lambda: {"status": "NOT_STARTED", "sessions": 0}
+        default_factory=lambda: {
+            "status": "NOT_STARTED",
+            "sessions_observed": 0,
+            "required_sessions": 5,
+        }
     )
     last_safety_evidence: SafetyEvidence | None = None
 
@@ -125,13 +133,13 @@ def _dashboard_html() -> str:
 <section class="panel"><h2>Open orders</h2><pre id="open_orders">[]</pre></section>
 <section class="panel"><h2>Positions</h2><pre id="positions">[]</pre></section>
 <section class="panel"><h2>Broker command intents</h2><pre id="intents">[]</pre></section>
-<section class="panel"><h2>Qualification</h2><pre id="qualification">{}</pre></section>
+<section class="panel"><h2>Broker Shadow qualification</h2><div id="qualification-summary"></div><pre id="qualification">{}</pre></section>
 <section class="panel"><h2>Operations</h2><input id="token" type="password" placeholder="local control token"><br><button onclick="act('/api/control/pause')">Pause entries</button><button onclick="act('/api/control/reconcile')">Reconcile</button><button class="danger" onclick="act('/api/control/emergency-stop')">Emergency stop</button><pre id="action"></pre></section>
 <section class="panel"><h2>Recent errors</h2><pre id="errors">[]</pre></section>
 </main><script>
 const esc=v=>String(v??'unknown').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const row=(k,v)=>`<div class="row"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`;
-async function refresh(){try{let r=await fetch('/api/state',{signal:AbortSignal.timeout(4000)});if(!r.ok)throw Error('State unavailable');let s=await r.json();document.querySelector('#env').textContent=s.execution_environment;document.querySelector('#backend').textContent=s.demo_backend||'LIVE BROKER';document.querySelector('#mode').textContent=s.trading_mode;document.querySelector('#safety').textContent=s.runtime_safety_state;let simulated=s.demo_backend==='OFFLINE_SIM';document.querySelector('#system').innerHTML=row('Safety reason',s.safety_reason)+row(simulated?'Simulator connected':'Broker connected',s.broker_connected)+row('Model',s.model_healthy)+row('Database',s.database_healthy)+row('Market data fresh',s.market_data_fresh)+row('Reconciled',s.reconciled)+row('Write firewall',s.external_write_firewall)+row('Last scan',s.last_scan_at);let observed=s.observed_broker_account?`${s.observed_broker_account.cash} cash / ${s.observed_broker_account.buying_power} BP`:'not connected';let effective=s.effective_account?`${s.effective_account.cash} cash / ${s.effective_account.buying_power} BP`:'not initialized';document.querySelector('#accounts').innerHTML=row(simulated?'SIMULATED OBSERVATION':'REAL BROKER OBSERVED',observed)+row('EFFECTIVE/SHADOW EXECUTION',effective);let replay=s.replay||{};document.querySelector('#provenance').innerHTML=row('Data mode',simulated?'HISTORICAL REPLAY — NOT LIVE':'BROKER DATA — CHECK FRESHNESS')+row('Replay complete',replay.complete)+row('Replay time',replay.trading_clock)+row('Fixture version',replay.fixture_version)+row('Qualification sessions',s.qualification.sessions);for(let id of ['candidates','proposals','open_orders','positions','qualification','errors'])document.querySelector('#'+id).textContent=JSON.stringify(s[id]??s.recent_errors,null,2);let ir=await fetch('/api/broker-command-intents',{signal:AbortSignal.timeout(4000)});if(!ir.ok)throw Error('Audit unavailable');document.querySelector('#intents').textContent=JSON.stringify(await ir.json(),null,2)}catch(e){document.querySelector('#safety').textContent='STALE / CONNECTION FAILED';document.querySelector('#errors').textContent='Dashboard refresh failed. Displayed data may be stale; verify local service health.'}}
+async function refresh(){try{let [r,qr,ir]=await Promise.all([fetch('/api/state',{signal:AbortSignal.timeout(4000)}),fetch('/api/qualification',{signal:AbortSignal.timeout(4000)}),fetch('/api/broker-command-intents',{signal:AbortSignal.timeout(4000)})]);if(!r.ok)throw Error('State unavailable');if(!qr.ok)throw Error('Qualification unavailable');if(!ir.ok)throw Error('Audit unavailable');let s=await r.json(),q=await qr.json();document.querySelector('#env').textContent=s.execution_environment;document.querySelector('#backend').textContent=s.demo_backend||'LIVE BROKER';document.querySelector('#mode').textContent=s.trading_mode;document.querySelector('#safety').textContent=s.runtime_safety_state;let simulated=s.demo_backend==='OFFLINE_SIM';document.querySelector('#system').innerHTML=row('Safety reason',s.safety_reason)+row(simulated?'Simulator connected':'Broker connected',s.broker_connected)+row('Model',s.model_healthy)+row('Database',s.database_healthy)+row('Market data fresh',s.market_data_fresh)+row('Reconciled',s.reconciled)+row('Write firewall',s.external_write_firewall)+row('Last scan',s.last_scan_at);let observed=s.observed_broker_account?`${s.observed_broker_account.cash} cash / ${s.observed_broker_account.buying_power} BP`:'not connected';let effective=s.effective_account?`${s.effective_account.cash} cash / ${s.effective_account.buying_power} BP`:'not initialized';document.querySelector('#accounts').innerHTML=row(simulated?'SIMULATED OBSERVATION':'REAL BROKER OBSERVED',observed)+row('EFFECTIVE/SHADOW EXECUTION',effective);let replay=s.replay||{};document.querySelector('#provenance').innerHTML=row('Data mode',simulated?'HISTORICAL REPLAY — NOT LIVE':'AUTHENTICATED CURRENT BROKER/MARKET')+row('Replay complete',replay.complete)+row('Replay time',replay.trading_clock)+row('Fixture version',replay.fixture_version)+row('Qualification sessions',`${q.sessions_observed||0}/${q.required_sessions||5}`);let real=q.current_real_broker||{},shadow=q.current_shadow_ledger||{},identity=q.account_identity||{},totals=q.totals||{},cap=q.capability||{};document.querySelector('#qualification-summary').innerHTML=row('Status',q.status)+row('Regular sessions',`${q.sessions_observed||0}/${q.required_sessions||5}`)+row('Same account',identity.stable?identity.masked_fingerprint:'PENDING / FAILED')+row('REAL BROKER OBSERVED',real.observed?`${real.cash} cash / ${real.buying_power} BP`:'not qualified')+row('SHADOW EXECUTION',shadow.observed?`${shadow.cash} cash / ${shadow.buying_power} BP; P&L ${shadow.realized_pnl}/${shadow.unrealized_pnl}`:'not initialized')+row('MCP catalog',cap.catalog_hash||'pending')+row('Exact intents / denials / transmitted',`${totals.complete_command_intents||0} / ${totals.firewall_denials||0} / ${totals.external_writes_transmitted||0}`)+row('Restarts / unresolved incidents',`${totals.restart_events||0} / ${totals.unresolved_incidents||0}`);for(let id of ['candidates','proposals','open_orders','positions','errors'])document.querySelector('#'+id).textContent=JSON.stringify(s[id]??s.recent_errors,null,2);document.querySelector('#qualification').textContent=JSON.stringify({gates:q.gates,warnings:q.warnings,audit_issues:q.audit_issues},null,2);document.querySelector('#intents').textContent=JSON.stringify(await ir.json(),null,2)}catch(e){document.querySelector('#safety').textContent='STALE / CONNECTION FAILED';document.querySelector('#errors').textContent='Dashboard refresh failed. Displayed data may be stale; verify local service health.'}}
 async function act(path){let t=document.querySelector('#token').value;let r=await fetch(path,{method:'POST',headers:{'X-Dashboard-Token':t}});document.querySelector('#action').textContent=await r.text();await refresh()}refresh();setInterval(refresh,5000);
 </script></body></html>"""
 
@@ -147,9 +155,20 @@ def create_app(
     reconcile: Callable[[], Awaitable[bool]] | None = None,
     federal_repository: RegistryRepository | None = None,
     reference_clock: Clock | None = None,
+    qualification_service: BrokerShadowQualificationService | None = None,
 ) -> FastAPI:
     application = FastAPI(title="Options Sentinel", version="0.1.0", docs_url="/api/docs")
     expected_token = dashboard_token or os.getenv("SENTRY_DASHBOARD_TOKEN", "")
+    if (
+        qualification_service is None
+        and view.binding.environment is ExecutionEnvironment.DEMO
+        and view.binding.demo_backend is DemoBackend.BROKER_SHADOW
+    ):
+        qualification_service = BrokerShadowQualificationService(
+            view.binding,
+            cast(QualificationRepository, repository),
+            clock,
+        )
 
     async def authorize_control(x_dashboard_token: str = Header(default="")) -> None:
         if not config.dashboard.require_token_for_controls:
@@ -205,6 +224,42 @@ def create_app(
     @application.get("/api/state")
     async def state_snapshot() -> dict[str, Any]:
         return view.snapshot()
+
+    @application.get("/api/qualification")
+    async def qualification_status() -> dict[str, object]:
+        if qualification_service is None:
+            return {
+                "status": "NOT_APPLICABLE",
+                "required_profile": "DEMO/BROKER_SHADOW",
+                "current_profile": (
+                    f"{view.binding.environment.value}/"
+                    f"{view.binding.demo_backend.value if view.binding.demo_backend else 'LIVE'}"
+                ),
+                "sessions_observed": 0,
+                "required_sessions": 5,
+                "gates": [
+                    {
+                        "code": "broker_shadow_runtime",
+                        "status": "PENDING",
+                        "detail": "OFFLINE_SIM and LIVE never count as broker-shadow sessions",
+                    }
+                ],
+                "warnings": [],
+                "audit_issues": [],
+                "totals": {},
+                "current_real_broker": {"observed": False},
+                "current_shadow_ledger": {"observed": False},
+                "capability": {"snapshot_present": False},
+                "account_identity": {"present": False, "stable": False},
+            }
+        report = await qualification_service.status()
+        public = report.public_payload()
+        view.qualification = {
+            "status": report.status.value,
+            "sessions_observed": report.sessions_observed,
+            "required_sessions": report.required_sessions,
+        }
+        return public
 
     @application.get("/api/broker-command-intents")
     async def broker_command_intents() -> list[dict[str, Any]]:

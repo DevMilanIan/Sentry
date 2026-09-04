@@ -26,7 +26,7 @@ from app.broker.robinhood_mcp import (
     RobinhoodReadReviewClient,
     SelectedAgenticAccount,
 )
-from app.broker.shadow import RobinhoodShadowBroker
+from app.broker.shadow import BrokerShadowReviewEvidence, RobinhoodShadowBroker
 from app.broker.shadow_ledger import (
     DepositRecord,
     ExpirationPolicy,
@@ -34,6 +34,7 @@ from app.broker.shadow_ledger import (
     LedgerSnapshot,
     ShadowLedger,
 )
+from app.broker.shadow_runtime import BrokerShadowRuntime, BrokerShadowRuntimeSnapshot
 from app.broker.simulated import SimulatedBroker
 
 __all__ = [
@@ -41,6 +42,9 @@ __all__ = [
     "Broker",
     "BrokerAccountExecution",
     "BrokerCapabilities",
+    "BrokerShadowReviewEvidence",
+    "BrokerShadowRuntime",
+    "BrokerShadowRuntimeSnapshot",
     "CapabilityDescriptor",
     "CommandIntentRecorder",
     "ConservativeFillModel",

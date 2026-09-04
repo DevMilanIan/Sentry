@@ -168,7 +168,11 @@ def high_features(loaded: LoadedConfig) -> FeatureProvider:
             effective_at=inputs.event.effective_at,
             observed_at=inputs.event.created_at,
         )
-        surveillance = {key: Decimal("100") for key in loaded.strategy.scoring.surveillance}
+        surveillance = {
+            key: Decimal("100")
+            for key in loaded.strategy.scoring.surveillance
+            if key != "federal_exposure"
+        }
         quality = {
             key: Decimal("100")
             for key in loaded.strategy.scoring.trade_quality

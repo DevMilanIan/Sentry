@@ -5,12 +5,13 @@ from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 from app.catalysts.collector import OfficialSourceCollector, deduplicate_documents
+from app.catalysts.entity_mapping import EntityMappingStatus, ExplicitIssuerMapper
 from app.catalysts.models import SourceDocument
 from app.clock.base import Clock
 from app.config import SourcesConfig
 from app.db.repository import InMemoryAuditRepository, PostgresAuditRepository
 from app.domain.enums import DemoBackend
-from app.domain.models import SentinelEvent
+from app.domain.models import SentinelEvent, sha256_json
 from app.exceptions import DataInvalidError, SafetyCriticalError, TransientError
 
 
@@ -42,6 +43,7 @@ class CatalystIngestionWorker:
         self.repository = repository
         self.collector = collector
         self.maximum_event_age = maximum_event_age
+        self.issuer_mapper = ExplicitIssuerMapper(config)
         self._lock = asyncio.Lock()
 
     async def poll(self) -> None:
@@ -124,6 +126,7 @@ class CatalystIngestionWorker:
         else:
             # Preserve the earliest durable observation, not the most recent fetch.
             document = SourceDocument.model_validate(existing["payload"])
+        entity_mapping = self.issuer_mapper.map(document)
         publication = document.publication_time
         # Retain unknown/stale/future-dated material for inspection but do not wake
         # decision workers with a current-catalyst claim that lacks temporal proof.
@@ -131,7 +134,9 @@ class CatalystIngestionWorker:
             return False
         event_id = uuid5(
             NAMESPACE_URL,
-            f"official-source-event:{self.repository.binding.idempotency_namespace}:{document_id}",
+            "official-source-event-v2:"
+            f"{self.repository.binding.idempotency_namespace}:{document_id}:"
+            f"{entity_mapping.mapping_config_digest}",
         )
         if await self.repository.find_payload("sentinel_events", "event_id", str(event_id)):
             return False
@@ -140,17 +145,28 @@ class CatalystIngestionWorker:
             event_id=event_id,
             event_type="official_source_document",
             source=document.source_id,
-            # Knowledge becomes available when fetched, never retroactively at publication.
-            effective_at=document.fetched_at,
-            tickers=document.tickers,
+            # Classification is known only when this configured mapping is evaluated.
+            # On the initial fetch this equals fetched_at; later config revisions do
+            # not retroactively create knowledge at the document publication time.
+            effective_at=now,
+            tickers=(entity_mapping.mapped_ticker,)
+            if entity_mapping.status is EntityMappingStatus.MAPPED
+            and entity_mapping.mapped_ticker is not None
+            else (),
             severity=1,
-            deduplication_key=document.deduplication_key,
+            deduplication_key=sha256_json(
+                {
+                    "document": document.deduplication_key,
+                    "entity_mapping": entity_mapping.mapping_config_digest,
+                }
+            ),
             raw_reference_ids=(str(document_id),),
             payload={
                 "data_mode": "LIVE_READ",
                 "publication_time": publication.isoformat(),
                 "content_hash": document.content_hash,
                 "untrusted_external_text": True,
+                "entity_mapping": entity_mapping.model_dump(mode="json"),
             },
         )
         await self.repository.append("sentinel_events", event)

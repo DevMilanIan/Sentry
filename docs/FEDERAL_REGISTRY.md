@@ -57,3 +57,24 @@ Page size is 1–200. History returns `next_before_sequence`; snapshots return
 scan ceiling and fails visibly if exceeded. A narrow relationship history can still be paged when
 the global registry exceeds that ceiling. This is not a silent first-page-only score. No score
 overrides liquidity, contract quality, deterministic risk, or execution safety.
+
+## Candidate-scoring integration
+
+`CandidateResearchWorker(..., federal_registry=FederalRegistryService(...))` is the explicit
+composition point. The registry must use the same runtime binding; the runtime supplies the wall
+clock and repository. For each event, the worker queries the registry at exactly
+`event.created_at`, not at the later processing time. Registry revisions recorded after that cutoff
+cannot enter the packet.
+
+The existing `federal_exposure` surveillance component receives the versioned 0–100 score. A
+missing registry injection leaves the component missing and therefore zero. An injected registry
+with only stale, inactive, ended, future-effective, or unverified entries supplies an explicit zero.
+Only `VERIFIED_REFERENCE` relationships become full candidate facts; excluded relationship IDs
+remain in the aggregate score fact so the exclusion is auditable without presenting an unverified
+claim to the reasoning model. Fact values carry relationship/revision IDs, revision digest, primary
+source URL, evidence status, policy version, score version, and the exact as-of time.
+
+Candidate packets are limited to 16 registry relationships by default and fail that research
+attempt visibly if the bound is exceeded. Custom feature providers cannot supply or override
+`federal_exposure`; the registry is the sole source of that component. This feature remains
+research-only and adds no broker, execution-service, approval, risk-limit, or hard-risk authority.

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import unicodedata
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -205,6 +207,57 @@ class OfficialSourceConfig(ConfigModel):
     id: str = Field(min_length=1)
     url: str = Field(pattern=r"^https://")
     enabled: bool = False
+    surveillance_priority: Decimal = Field(default=Decimal("60"), ge=0, le=100)
+
+
+def _normalized_issuer_alias(value: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    flattened = "".join(character if character.isalnum() else " " for character in normalized)
+    return tuple(flattened.split())
+
+
+class IssuerAliasMappingConfig(ConfigModel):
+    """Operator-maintained literal issuer alias; never a discovered ticker guess."""
+
+    mapping_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,79}$")
+    ticker: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,11}$")
+    issuer_name: str = Field(min_length=2, max_length=240)
+    aliases: tuple[str, ...] = Field(min_length=1, max_length=20)
+    source_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
+    provenance_url: str = Field(min_length=1, max_length=2048)
+
+    @model_validator(mode="after")
+    def bounded_explicit_aliases(self) -> IssuerAliasMappingConfig:
+        if not self.issuer_name.strip() or any(
+            ord(character) < 32 for character in self.issuer_name
+        ):
+            raise ValueError("issuer name must be nonblank plain text")
+        normalized = [_normalized_issuer_alias(alias) for alias in self.aliases]
+        if (
+            any(not tokens or len(" ".join(tokens)) < 4 for tokens in normalized)
+            or len(normalized) != len(set(normalized))
+            or any(any(ord(character) < 32 for character in alias) for alias in self.aliases)
+            or _normalized_issuer_alias(self.ticker) in normalized
+        ):
+            raise ValueError(
+                "issuer aliases must be unique, bounded entity names rather than ticker symbols"
+            )
+        if len(self.source_ids) != len(set(self.source_ids)):
+            raise ValueError("issuer mapping source IDs must be unique")
+        parts = urlsplit(self.provenance_url)
+        if (
+            not self.provenance_url.isascii()
+            or any(ord(character) <= 32 for character in self.provenance_url)
+            or "\\" in self.provenance_url
+            or parts.scheme != "https"
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.port not in (None, 443)
+            or parts.fragment
+        ):
+            raise ValueError("issuer mapping provenance must be a credential-free HTTPS URL")
+        return self
 
 
 class SourcesConfig(ConfigModel):
@@ -212,12 +265,29 @@ class SourcesConfig(ConfigModel):
     sec_user_agent: str = Field(min_length=10)
     poll_seconds: int = Field(gt=0)
     official_sources: tuple[OfficialSourceConfig, ...]
+    issuer_mappings: tuple[IssuerAliasMappingConfig, ...] = ()
 
     @model_validator(mode="after")
-    def unique_source_ids(self) -> SourcesConfig:
+    def valid_source_and_mapping_identities(self) -> SourcesConfig:
         ids = [source.id for source in self.official_sources]
         if len(ids) != len(set(ids)):
             raise ValueError("official source IDs must be unique")
+        mapping_ids = [mapping.mapping_id for mapping in self.issuer_mappings]
+        if len(mapping_ids) != len(set(mapping_ids)):
+            raise ValueError("issuer mapping IDs must be unique")
+        known_sources = set(ids)
+        aliases: dict[tuple[str, tuple[str, ...]], str] = {}
+        for mapping in self.issuer_mappings:
+            if not set(mapping.source_ids) <= known_sources:
+                raise ValueError("issuer mappings may reference only configured source IDs")
+            for source_id in mapping.source_ids:
+                for alias in mapping.aliases:
+                    key = (source_id, _normalized_issuer_alias(alias))
+                    assigned = aliases.setdefault(key, mapping.ticker)
+                    if assigned != mapping.ticker:
+                        raise ValueError(
+                            "one literal issuer alias cannot map to multiple tickers for a source"
+                        )
         return self
 
 
