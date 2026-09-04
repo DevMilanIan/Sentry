@@ -7,6 +7,7 @@ from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from app.clock.base import Clock
+from app.clock.market_calendar import UsEquityCalendar
 from app.domain.enums import OrderSide
 from app.domain.models import OptionQuote, Position
 
@@ -111,9 +112,19 @@ class PositionManager:
         days_remaining = (position.contract.expiration - local_now.date()).days
         if days_remaining <= self._policy.sell_to_close_days_before_expiration:
             triggers.append(ExitTrigger.DTE_CUTOFF)
-        past_eod_cutoff = local_now.timetz().replace(tzinfo=None) >= self._policy.end_of_day_cutoff
-        if self._policy.end_of_day_exit and past_eod_cutoff:
-            triggers.append(ExitTrigger.END_OF_DAY)
+        if self._policy.end_of_day_exit:
+            calendar = UsEquityCalendar()
+            session_day = now.astimezone(calendar.timezone).date()
+            session_close = calendar.regular_session_close(session_day)
+            if session_close is not None:
+                configured_cutoff = datetime.combine(
+                    local_now.date(), self._policy.end_of_day_cutoff, tzinfo=local_now.tzinfo
+                )
+                # Retain an operator's earlier cutoff, but never wait past the
+                # 15-minute equity-close buffer on a scheduled early-close day.
+                cutoff = min(configured_cutoff, session_close - timedelta(minutes=15))
+                if now >= cutoff:
+                    triggers.append(ExitTrigger.END_OF_DAY)
 
         spread_percent = (
             ((quote.ask - quote.bid) / quote.ask) * Decimal("100")

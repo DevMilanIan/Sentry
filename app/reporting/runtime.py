@@ -28,6 +28,7 @@ class RuntimeReporter:
             clock, view.binding.environment, view.binding.demo_backend, repository.append
         )
         self.builder = OperationalReportBuilder()
+        self.calendar = UsEquityCalendar()
 
     async def tick(self) -> None:
         state = self.view.safety.state.value
@@ -55,10 +56,13 @@ class RuntimeReporter:
         report_type: str | None = None
         if replay and self.view.replay.get("complete"):
             report_type = "replay_completion"
-        elif not replay and UsEquityCalendar().is_regular_session(local.date()):
-            if time(8) <= local.time() < time(9, 30):
+        elif not replay:
+            # Raises explicitly when the official schedule needs a refresh;
+            # an unverified year must not silently produce a guessed EOD report.
+            close = self.calendar.regular_session_close(local.date())
+            if close is not None and time(8) <= local.time() < time(9, 30):
                 report_type = "premarket"
-            elif local.time() >= time(16):
+            elif close is not None and local >= close:
                 report_type = "weekly" if local.weekday() == 4 else "end_of_day"
         if report_type is None:
             return

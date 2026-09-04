@@ -10,6 +10,8 @@ from fastapi import FastAPI
 
 from app.api.dashboard import RuntimeView, create_app
 from app.broker.base import BrokerAccountExecution
+from app.catalysts.collector import OfficialSourceCollector
+from app.catalysts.runtime import CatalystIngestionWorker
 from app.clock.base import Clock, RealClock
 from app.config import LoadedConfig
 from app.controller.master import MasterController, PeriodicJob
@@ -200,6 +202,16 @@ async def build_application(
                 loaded.app.runtime.offline_step_seconds,
                 offline.dispatch_proposals,
             )
+        )
+    else:
+        source_worker = CatalystIngestionWorker(
+            loaded.sources,
+            clock,
+            audit,
+            OfficialSourceCollector(clock, user_agent=loaded.sources.sec_user_agent),
+        )
+        controller.add_job(
+            PeriodicJob("official_sources", loaded.sources.poll_seconds, source_worker.poll)
         )
     trading_clock = offline.clock if offline is not None else clock
 

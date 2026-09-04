@@ -204,6 +204,7 @@ class StrategyConfig(ConfigModel):
 class OfficialSourceConfig(ConfigModel):
     id: str = Field(min_length=1)
     url: str = Field(pattern=r"^https://")
+    enabled: bool = False
 
 
 class SourcesConfig(ConfigModel):

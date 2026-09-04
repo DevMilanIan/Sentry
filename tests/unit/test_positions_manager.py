@@ -4,7 +4,10 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from app.clock.base import VirtualClock
+from app.clock.market_calendar import CalendarCoverageError
 from app.domain.enums import ExecutionEnvironment, OptionType
 from app.domain.models import OptionContract, OptionQuote, Position, ProviderMetadata
 from app.positions import ExitPolicy, ExitTrigger, PositionManager
@@ -84,3 +87,31 @@ def test_stale_or_zero_bid_never_invents_an_executable_exit_price() -> None:
     assert decision.limit_price is None
     assert ExitTrigger.HARD_PORTFOLIO_EMERGENCY in decision.triggers
     assert ExitTrigger.LIQUIDITY_DETERIORATION in decision.triggers
+
+
+@pytest.mark.parametrize(
+    "at,expected_eod",
+    [
+        (datetime(2026, 11, 27, 17, 44, 59, tzinfo=UTC), False),
+        (datetime(2026, 11, 27, 17, 45, tzinfo=UTC), True),
+        (datetime(2026, 9, 3, 19, 44, 59, tzinfo=UTC), False),
+        (datetime(2026, 9, 3, 19, 45, tzinfo=UTC), True),
+    ],
+)
+def test_end_of_day_exit_keeps_fifteen_minute_buffer_before_early_close(
+    at: datetime, expected_eod: bool
+) -> None:
+    manager = PositionManager(VirtualClock(at), ExitPolicy(version="eod-v1", end_of_day_exit=True))
+    contract = CONTRACT.model_copy(update={"expiration": date(2026, 12, 18)})
+    holding = position().model_copy(update={"contract": contract})
+    current_quote = quote("0.07", "0.08", at=at).model_copy(update={"contract": contract})
+    decision = manager.evaluate_exit(holding, current_quote)
+    assert (ExitTrigger.END_OF_DAY in decision.triggers) is expected_eod
+    assert decision.executable is expected_eod
+
+
+def test_end_of_day_exit_requires_verified_session_calendar() -> None:
+    at = datetime(2029, 1, 2, 21, tzinfo=UTC)
+    manager = PositionManager(VirtualClock(at), ExitPolicy(version="eod-v1", end_of_day_exit=True))
+    with pytest.raises(CalendarCoverageError, match="unverified"):
+        manager.evaluate_exit(position(), quote("0.07", "0.08", at=at))

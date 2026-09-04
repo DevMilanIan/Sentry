@@ -1,4 +1,4 @@
-version: sources-v1
+version: sources-v2-verified-feed-opt-in
 sec_user_agent: OptionsSentinel local-research contact-required@example.invalid
 poll_seconds: 900
 official_sources:
@@ -14,6 +14,6 @@ official_sources:
     url: https://www.sec.gov/news/pressreleases.rss
   - id: federal_reserve
     url: https://www.federalreserve.gov/feeds/press_all.xml
+    enabled: true
   - id: treasury
     url: https://home.treasury.gov/news/press-releases/feed
-

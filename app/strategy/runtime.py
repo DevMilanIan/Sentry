@@ -13,7 +13,14 @@ from pydantic import BaseModel, Field
 from app.catalysts.models import SourceDocument
 from app.clock.base import Clock
 from app.config import LoadedConfig, RuntimeBinding
-from app.domain.enums import AttentionLevel, Direction, ExecutionEnvironment, OptionType, OrderSide
+from app.domain.enums import (
+    AttentionLevel,
+    DemoBackend,
+    Direction,
+    ExecutionEnvironment,
+    OptionType,
+    OrderSide,
+)
 from app.domain.models import (
     DomainModel,
     EquityQuote,
@@ -575,6 +582,11 @@ class CandidateResearchWorker:
             if row is None:
                 continue
             document = SourceDocument.model_validate(row["payload"])
+            if self.binding.demo_backend is DemoBackend.OFFLINE_SIM:
+                if document.data_mode == "LIVE_READ":
+                    continue
+            elif document.data_mode != "LIVE_READ":
+                continue
             base = configured.get(document.source_id)
             if base is None or symbol not in {ticker.upper() for ticker in document.tickers}:
                 continue
