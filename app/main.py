@@ -41,6 +41,24 @@ def _upgrade_database(url: str) -> None:
     command.upgrade(alembic, "head")
 
 
+def _validate_migration_schemas(loaded: LoadedConfig) -> None:
+    # The shipped revisions explicitly create shared/demo/live. Refuse a
+    # custom-schema CLI deployment before connecting or migrating another schema.
+    schemas = (
+        (loaded.app.database.shared_schema, "shared"),
+        (loaded.app.database.demo_schema, "demo"),
+        (loaded.app.database.live_schema, "live"),
+        (loaded.demo.database_schema, "demo"),
+        (loaded.broker_shadow.database_schema, "demo"),
+        (loaded.live.database_schema, "live"),
+    )
+    if any(actual != supported for actual, supported in schemas):
+        raise ConfigurationError(
+            "production migrations support only shared/demo/live schemas; "
+            "custom-schema deployment requires separately reviewed migrations"
+        )
+
+
 async def _demo_once(config_dir: Path) -> dict[str, object]:
     loaded = load_config(config_dir)
     binding = loaded.bind_runtime()
@@ -82,6 +100,7 @@ def cli(argv: Sequence[str] | None = None) -> int:
             print(loaded.bind_runtime().model_dump_json(indent=2))
             return 0
         if arguments.command == "database-upgrade":
+            _validate_migration_schemas(loaded)
             _upgrade_database(loaded.app.database.url)
             return 0
         if arguments.command == "demo-once":
@@ -89,6 +108,7 @@ def cli(argv: Sequence[str] | None = None) -> int:
             return 0
         if arguments.command == "serve":
             # Migrations are mandatory; failure aborts startup rather than silently using memory.
+            _validate_migration_schemas(loaded)
             binding = loaded.bind_runtime()
             configure_json_logging(binding.runtime_directory / "logs" / "sentinel.jsonl")
             _upgrade_database(loaded.app.database.url)

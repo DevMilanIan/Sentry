@@ -1,0 +1,21 @@
+# Only source required for the runtime and explicit verification target enters
+# the build context. Keep local credentials, virtual environments, downloaded
+# installers, runtime evidence, and Git history out of the Docker daemon.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!README.md
+!alembic.ini
+!app/
+!app/**
+!config/
+!config/**
+!migrations/
+!migrations/**
+!tests/
+!tests/**
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
