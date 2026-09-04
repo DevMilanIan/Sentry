@@ -16,8 +16,9 @@ Core offline lifecycle, continuous finite replay, durable execution-store code, 
 reconciliation, local reporting, and fault regressions are implemented. The measured routine
 model is `qwen3.5:4b`; see `docs/MODEL_BENCHMARK.md`.
 
-This is not yet an unattended production deployment or a completed V1. WSL/Docker and
-real PostgreSQL verification need host provisioning. Broker-shadow authentication/schema
+This is not yet an unattended production deployment or a completed V1. WSL/Docker packages
+are installed, but host reboot activation and real PostgreSQL verification are pending.
+See `docs/SETUP_RESUME.md`. Broker-shadow authentication/schema
 mapping, five real qualification sessions, and later user-owned Live gates remain open.
 
 ## Safe quick start
@@ -59,7 +60,7 @@ See `docs/LIVE_GATES.md` for the deliberately unmet Live requirements.
 
 ## Verification checkpoint — September 3, 2026
 
-447 tests pass; ten real-PostgreSQL cases are explicitly skipped pending a test database.
+461 tests pass; eleven real-PostgreSQL cases are explicitly skipped pending a test database.
 Ruff and strict mypy pass. The default is measured `qwen3.5:4b`, with trading still disabled.
 Read-only MCP transport, durable shadow recovery, bounded official-feed ingestion, and the
 2026–2028 calendar have local test coverage, not authenticated production qualification.

@@ -122,6 +122,9 @@
 
 ## Remaining setup and qualification work
 
+Latest host update: see the authorized provisioning section below and `SETUP_RESUME.md`;
+the following original remaining-work list predates the late-evening installs.
+
 - WSL2/Ubuntu and Docker provisioning remain open; no unattended WSL/container deployment has
   been demonstrated. Historical host-clock findings remain in `MACHINE_AUDIT.md`; fresh clock and
   startup evidence are required before timestamp-sensitive broker qualification.
@@ -134,3 +137,30 @@
   performed by this work. Same-account broker-shadow qualification, user-owned funding/capital
   decisions, and explicit Live activation remain staged gates. V1/full-project completion is not
   claimed.
+
+## 2026-09-03 — Authorized host provisioning and reboot checkpoint
+
+- User reported automatic time and authorized PC installs/commands, then explicitly approved
+  reboot after installations. Rechecked actual state: clock offset had improved to ~150 ms,
+  but Windows Time was still stopped/manual and the current process was not elevated.
+- Used normal UAC elevation. The Windows PowerShell 5 helper exited under its Restricted
+  policy without making changes. Verified Microsoft-signed PowerShell 7.6.5 and used its
+  existing policy; no global execution policy was changed. Clock service setup/resync passed,
+  offsets measured 136–147 ms, AC sleep was disabled, and both Windows features enabled with
+  restart required. The caller itself remains unelevated; elevated helpers ended successfully.
+- Installed Python 3.12.10 per-user. Downloaded the official Docker Desktop 4.89.0 installer,
+  checked WinGet's exact SHA256 and Valid Docker Inc Authenticode, and completed documented
+  per-user installation (installer exit 0). CLI 29.7.2 and Compose 5.5.0 verified; engine remains
+  stopped. WinGet's current Docker entry does not detect this per-user installation, so the
+  dependency script now checks installed paths before attempting another installation mode.
+- Upgraded existing WSL 2.3.26.0 to 2.7.12.0 using a separately elevated WinGet helper after
+  the unelevated update correctly returned administrator-required. Installed the Ubuntu 24.04
+  LTS package; no distribution was initialized before the required host reboot.
+- Added a source-whitelist `.dockerignore`, separate opt-in verification build target/profile,
+  and actual Alembic fresh/repeat smoke test in a uniquely created ownership-tagged disposable
+  database. No database port is published and production `sentinel` is not migrated by that
+  test. Unsupported custom production schema overrides now reject before migration.
+- Final pre-reboot checks: **461 passed, 11 actual-PostgreSQL tests skipped**; Ruff/mypy clean;
+  setup scripts parsed. No `.env`, database credentials, broker credentials, native database,
+  running container stack, or startup task was created. `SETUP_RESUME.md` contains exact paths
+  and remaining post-reboot checks. No brokerage or trading authority changed.

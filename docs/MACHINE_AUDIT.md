@@ -3,7 +3,7 @@
 **Initial audit:** 2026-09-02; **setup update:** 2026-09-03 (America/New_York).
 
 **Safety conclusion:** The hardware supports local inference and credential-free offline testing.
-Host provisioning, clock remediation, and a running PostgreSQL deployment remain open. This is
+Host installation has progressed; reboot activation and a running PostgreSQL deployment remain open. This is
 not evidence of unattended-service readiness or permission for broker authentication, funding,
 or live trading.
 
@@ -18,13 +18,13 @@ or live trading.
 | D: | Initial audit: 232.9 GiB SATA SSD, 60.3 GiB free | Not selected for primary database |
 | Host timezone | Now `Eastern Standard Time` (Windows ID, with daylight-saving support) | Application display zone is `America/New_York`; persisted event timestamps use UTC |
 | Privilege | Current session is not elevated | Windows feature/service changes require an administrator |
-| Virtualization | Initial audit: VBS/HVCI hypervisor active; WSL and Virtual Machine Platform features disabled | Enable the two features and reboot; a working WSL2 distribution has not been verified |
-| Docker | Docker CLI absent from `PATH`; no working Docker deployment verified | Provision after WSL2 enablement |
+| Virtualization | Both WSL and Virtual Machine Platform features enabled September 3 at 23:34 ET; both reported `RestartNeeded: True` | Reboot pending; a working WSL2 distribution has not been verified |
+| Docker | Desktop 4.89.0 installed per-user; CLI 29.7.2 and Compose 5.5.0 verified by absolute path | Engine not started; per-user install is not detected by the current WinGet package entry |
 | Ollama | Native Ollama 0.33.2 installed; `qwen3.5:9b` and `qwen3.5:4b` installed | Two completed structured-output benchmark runs are retained |
 | PostgreSQL | No native cluster/service/listener provisioned by this setup; Compose database not running | Database-backed migration and recovery checks remain pending |
-| Python | No system Python on `PATH`; Codex bundled CPython 3.12.13 available | Project `.venv` created from bundled runtime; install a maintained host Python for unattended service |
+| Python | User-scoped Python 3.12.10 installed and verified; existing project `.venv` still uses bundled CPython 3.12.13 | Docker production runtime remains separate; refresh PATH after login |
 | Git | Available; repository initialized on `main`; repository-local implementation identity configured | This does not imply changes are committed or published |
-| Windows Time | Service stopped, Manual; NTP points to `time.windows.com` | Unsafe until fixed |
+| Windows Time | Now Automatic/Running; synchronization succeeded at 23:34:12 ET; five offsets 136–147 ms | Passed initial 250 ms gate; recheck after reboot |
 
 ## Critical clock finding
 
@@ -78,6 +78,25 @@ attempted, and no database credentials, service, cluster, or listener were creat
 database provisioner. Downloaded files alone do not satisfy the PostgreSQL setup gate.
 
 ## Provisioning actions pending
+
+The September 3 late-evening setup completed the feature and clock changes described below.
+WSL was upgraded from 2.3.26.0 to 2.7.12.0, and the Ubuntu 24.04 LTS package 2404.0.5.0 was
+installed but not initialized as a distribution. Docker's official installer SHA256 matched
+`854626704AF28A160D5AF68B96B3E32EACF08AB397CE6C12EB02A04788D73681`; Authenticode was Valid,
+signed by Docker Inc. It was installed with documented `--user --quiet --backend=wsl-2` flags.
+The Docker subscription agreement was not pre-accepted with `--accept-license`; first launch
+may still require user action. No Docker engine/database readiness is claimed.
+
+Elevation used the normal UAC flow with verified Microsoft-signed PowerShell 7.6.5. Windows
+PowerShell 5's Restricted script policy prevented the first helper from running; no global
+execution-policy setting was changed. The second helper completed clock/feature setup;
+a separate elevated helper completed WSL package installation. AC automatic sleep was disabled.
+Local non-secret transcripts/status are in ignored `var/setup/host-20260903-2342.*` and
+`var/setup/host-20260903-wsl-update.*`. No database or broker credentials were created.
+
+The user explicitly approved restarting the PC after installations. See `SETUP_RESUME.md`
+for the post-reboot continuation. The following original provisioning checklist is retained
+as a runbook, not a claim that its remaining deployment checks have passed.
 
 1. Review and run `scripts/windows/Enable-Platform.ps1` in an elevated PowerShell. It requests
    Windows feature changes without automatically rebooting. Reboot, then update/install WSL2

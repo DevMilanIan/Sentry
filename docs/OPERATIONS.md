@@ -8,9 +8,11 @@ fail-closed even when healthy. `config/live.yaml` has external-write authority d
 starts `HALTED`. Neither a mode change, a funded account, nor a passing offline test grants
 external-write authority.
 
-As of September 3, host setup is not complete: WSL2/Docker and a running PostgreSQL deployment
-are unverified, and Windows Time is stopped. Ollama and both benchmark models are installed.
-See `docs/MACHINE_AUDIT.md` for evidence and the elevated setup/reboot steps. No broker OAuth,
+As of September 3 late evening, Docker Desktop, WSL 2.7.12, Ubuntu's package, and host Python
+are installed. Windows Time is Automatic/Running and passed the initial offset gate. The two
+Windows features still require a reboot; Docker engine, Ubuntu initialization, and a running
+PostgreSQL deployment are unverified. Ollama and both benchmark models remain installed.
+See `docs/SETUP_RESUME.md` for the checkpoint and `docs/MACHINE_AUDIT.md` for evidence. No broker OAuth,
 funding, account-backed shadow qualification, or live activation has been performed.
 
 ## Credential-free verification
@@ -65,6 +67,13 @@ After the host prerequisites and clock checks pass:
    execution health, reconciliation, freshness, and unresolved-submission fields together.
 5. Verify actual database-backed crash/restart recovery before unattended operation. The
    repository's injected/in-memory tests do not replace this deployment check.
+
+An opt-in container verification target is now available after PostgreSQL can start:
+`docker compose --profile verification run --build --rm verify`. It runs ten isolated-schema
+tests and a fresh/repeated Alembic migration test in an exclusively created, ownership-tagged
+disposable database. It does not migrate the deployed `sentinel` database or expose a database
+host port. See `tests/integration/POSTGRES.md`; these eleven tests remain unexecuted before reboot.
+The build context excludes local secrets, virtual environments, and downloaded installers.
 
 Compose uses PostgreSQL 17 on a named volume, with no database port published to the host. The
 application port is published only at `127.0.0.1:8000`. Configuration is mounted read-only and
