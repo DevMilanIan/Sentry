@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $envFile = Join-Path $ProjectDirectory '.env'
-$disabledFile = Join-Path $ProjectDirectory 'TRADING_DISABLED'
+$disabledFile = Join-Path $ProjectDirectory 'var\TRADING_DISABLED'
 if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
     throw "Missing ignored environment file: $envFile"
 }
@@ -27,4 +27,3 @@ try {
 } finally {
     Pop-Location
 }
-

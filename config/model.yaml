@@ -1,7 +1,7 @@
-version: model-v1
+version: model-v2-measured-latency
 provider: ollama
 base_url: http://localhost:11434
-model: qwen3.5:9b
+model: qwen3.5:4b
 normal_timeout_seconds: 60
 deep_timeout_seconds: 180
 max_repair_attempts: 1

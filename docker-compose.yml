@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: sentinel
       POSTGRES_USER: sentinel
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a unique local database password in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,7 +25,7 @@ services:
         condition: service_healthy
     env_file: [.env]
     environment:
-      SENTRY_DATABASE_URL: postgresql+asyncpg://sentinel:${POSTGRES_PASSWORD:-local-development-only}@postgres:5432/sentinel
+      SENTRY_DATABASE_URL: postgresql+asyncpg://sentinel:${POSTGRES_PASSWORD:?Set a unique local database password in .env}@postgres:5432/sentinel
     volumes:
       - ./config:/app/config:ro
       - ./var:/app/var
@@ -39,4 +39,3 @@ networks:
 
 volumes:
   postgres_data:
-

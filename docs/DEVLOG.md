@@ -60,6 +60,66 @@
   SQL was compiled and migration statements inspected with mocks; this is not a real PostgreSQL
   migration, concurrent-writer, backup/restore, or process-kill integration test.
 
+## 2026-09-03 — Verified model selection and further safety hardening
+
+- Completed the second real Ollama benchmark artifact,
+  `benchmarks/results/qwen35_2026-09-03_verified.json`, with 100 cases per model. Both models
+  produced 100% valid JSON and 99% allowed-fact-ID grounding. The 9B p95 was 18.580 seconds,
+  exceeding the 15-second limit; 4B p95 was 9.107 seconds. Selected `qwen3.5:4b` in the default
+  model configuration and environment example. These bounded fixture results do not prove
+  semantic entailment, trading quality, or profitability. See `MODEL_BENCHMARK.md`.
+- Fixed reservation accounting for pending entries, journal-failure reconciliation latching,
+  and proposal dispatch pagination. Durable command preparation now precedes order-intent
+  persistence when deterministic capability validation can still reject the command. A locally
+  denied pre-submission intent is accepted as non-submission evidence only with its exact
+  persisted transition; missing broker orders alone never authorize a retry.
+- Hardened Robinhood read/review response validation: unknown/ambiguous account state, tool
+  catalogs, collections, and review acceptance fail closed. The public account/portfolio tools
+  use a trusted, explicitly selected Agentic account adapter rather than a guessed response
+  mapping. No real response schema or account selection has been authenticated yet.
+- Added shadow-ledger restart snapshots, exact command/idempotency restoration checks,
+  failed-persistence mutation blocking, optional account pinning, and an explicit immutable
+  acknowledged-terminal-history baseline. Active or unacknowledged broker orders still fail
+  qualification. Production composition must persist the account/baseline envelope separately
+  from local ledger state; this is not yet a running broker-shadow service.
+- Added a concrete official MCP 2.1.1 read-only session and protected OAuth storage bridge.
+  Its tool names, endpoint, discovery bounds, uncached reads, and noninteractive authorization
+  failure path are tested with mocks. Existing valid protected credentials are required before
+  network creation. No OAuth was run, no real credentials were created, and unattended refresh,
+  authenticated account mapping, market data, and runtime composition remain open.
+- Added Windows-only runtime `pywin32`; installed version 312 and `win32crypt` import verified.
+  A fixture-only DPAPI roundtrip passed. Documentation distinguishes DPAPI encryption from
+  separately verified NTFS ACLs and directs future credential storage outside OneDrive.
+
+## 2026-09-03 — Source ingestion, calendar, and verification checkpoint
+
+- Added public-feed polling outside OFFLINE_SIM with explicit source opt-in, causal source
+  provenance, stored hashes, stable durable events, and rolled-feed crash-gap repair. Review
+  exposed four issues and drove fixes: whole-response deadlines, malformed-item error
+  classification, durable repair independent of the latest feed, and deterministic revision
+  retention. Only the verified Federal Reserve feed is enabled; the bounded read returned 20
+  documents. `CATALYST_INGESTION.md` records the incomplete broader-source and EDGAR coverage.
+- Verified the NYSE published 2026–2028 schedule, added early closes to phase/reporting/EOD exit
+  timing, and fixed Saturday New Year and pre-2022 Juneteenth rules. Session-close/phase requests
+  outside verified years fail explicitly. Calendar coverage is scheduled equity-session data,
+  not evidence of unscheduled closures or individual option trading cutoffs. See
+  `MARKET_CALENDAR.md`. Explicit simulation expiration-event timing remains a separate
+  limitation; the calendar change does not establish broker settlement semantics.
+- Added ten opt-in real-PostgreSQL tests for isolation, ingestion order, uniqueness/concurrency,
+  rollback, read-only health, and runtime restart. They create ownership-tagged disposable
+  schemas only. All ten remain skipped because `SENTRY_TEST_DATABASE_URL` is unset; actual
+  Alembic migration and deployment backup/restore remain unverified.
+- Aggregate verification at this checkpoint: **447 tests passed, 10 real-PostgreSQL tests
+  skipped**. Ruff passed repository-wide; strict mypy passed all 88 application files. One
+  third-party Starlette/AnyIO deprecation warning remains. The first aggregate run exposed a
+  stale test expectation for 9B; the test now checks the measured 4B default and clears model
+  environment overrides. `validate-config` and the credential-free causal entry/exit smoke
+  scenario passed; its stable journal hash remains
+  `fb2143e226b044a17902e48ed620e22a9686ccf3e55e0eae72b75c65aa05d1ff`.
+- Fresh read-only host check: process is not elevated; timezone is Eastern Standard Time;
+  Docker is absent; Windows Time is stopped/manual. No privilege boundary was bypassed, no
+  unverified PostgreSQL executable was run, and no host reboot or financial action was taken.
+
 ## Remaining setup and qualification work
 
 - WSL2/Ubuntu and Docker provisioning remain open; no unattended WSL/container deployment has

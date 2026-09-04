@@ -1,45 +1,99 @@
 # Machine audit
 
-**Audited:** 2026-09-02 (America/Los_Angeles)  
-**Safety conclusion:** Hardware is suitable. Host provisioning and clock remediation remain open;
-do not use timestamp-sensitive broker operation yet.
+**Initial audit:** 2026-09-02; **setup update:** 2026-09-03 (America/New_York).
+
+**Safety conclusion:** The hardware supports local inference and credential-free offline testing.
+Host provisioning, clock remediation, and a running PostgreSQL deployment remain open. This is
+not evidence of unattended-service readiness or permission for broker authentication, funding,
+or live trading.
 
 | Item | Observed state | Assessment |
 |---|---|---|
 | OS | Windows 11 Home 25H2, 10.0.26200 build 26200.9168 | Supported target |
 | CPU | AMD Ryzen 5 5600X, 6 cores / 12 threads | Sufficient |
-| RAM | 63.9 GiB | Sufficient |
+| RAM | 64 GiB installed, approximately 63.9 GiB usable | Sufficient |
 | GPU | NVIDIA RTX 3060 Ti, 8,192 MiB; driver 591.86 / CUDA 13.1 | Suitable for one quantized ~9B model |
-| GPU baseline | 43–44 °C during idle audit | Normal baseline; load benchmark pending |
-| C: | 930.5 GiB NVMe, 807.9 GiB free | Sufficient |
-| D: | 232.9 GiB SATA SSD, 60.3 GiB free | Not selected for primary database |
-| Host timezone | Pacific Standard Time | Store UTC; display market and user time explicitly |
-| Virtualization | VBS/HVCI hypervisor active; WSL and Virtual Machine Platform features disabled | Enable WSL2; reboot required |
-| Docker | Not installed | Install after WSL2 enablement |
-| Ollama | Not installed | Install native Windows service and benchmark |
+| GPU baseline | 43–44 °C during the initial idle audit | Load benchmark now recorded below |
+| C: | Initial audit: 930.5 GiB NVMe, 807.9 GiB free | Recheck free space before provisioning |
+| D: | Initial audit: 232.9 GiB SATA SSD, 60.3 GiB free | Not selected for primary database |
+| Host timezone | Now `Eastern Standard Time` (Windows ID, with daylight-saving support) | Application display zone is `America/New_York`; persisted event timestamps use UTC |
+| Privilege | Current session is not elevated | Windows feature/service changes require an administrator |
+| Virtualization | Initial audit: VBS/HVCI hypervisor active; WSL and Virtual Machine Platform features disabled | Enable the two features and reboot; a working WSL2 distribution has not been verified |
+| Docker | Docker CLI absent from `PATH`; no working Docker deployment verified | Provision after WSL2 enablement |
+| Ollama | Native Ollama 0.33.2 installed; `qwen3.5:9b` and `qwen3.5:4b` installed | Two completed structured-output benchmark runs are retained |
+| PostgreSQL | No native cluster/service/listener provisioned by this setup; Compose database not running | Database-backed migration and recovery checks remain pending |
 | Python | No system Python on `PATH`; Codex bundled CPython 3.12.13 available | Project `.venv` created from bundled runtime; install a maintained host Python for unattended service |
-| Git | Available; repository initialized on `main` | Local commit identity not yet configured |
+| Git | Available; repository initialized on `main`; repository-local implementation identity configured | This does not imply changes are committed or published |
 | Windows Time | Service stopped, Manual; NTP points to `time.windows.com` | Unsafe until fixed |
 
 ## Critical clock finding
 
-A five-sample `w32tm /stripchart` at approximately 18:45 PDT showed the local host consistently
-5.842–5.848 seconds slow. The latest recorded successful Windows Time synchronization was
-2026-08-24. Order logic, market-event ordering, replay capture, and qualification evidence must
-remain disabled until the service is automatic/running, resynchronization succeeds, and measured
-offset is within the operational threshold (initially 250 ms).
+The initial five-sample `w32tm /stripchart` at approximately 18:45 PDT on September 2 showed the
+host 5.842–5.848 seconds slow. Its recorded last successful Windows Time synchronization was
+2026-08-24. These are historical observations, not a new offset measurement. On September 3,
+`W32Time` was still stopped with Manual startup.
+
+Before timestamp-sensitive broker reads, current-market capture, or qualification evidence,
+set the service to Automatic/Running, resynchronize, and measure an absolute offset no greater
+than the initial 250 ms operational threshold. A timezone change does not repair clock skew.
+Deterministic offline fixtures use a virtual trading clock and can still be tested without
+representing their timestamps as current market observations.
+
+## Local model evidence
+
+`benchmarks/results/qwen35_2026-09-03_verified.json` completed at
+2026-09-03T15:43:59-04:00. Each model ran 100 cases with a 4,096-token context and Q4_K_M
+quantization. Model digests, individual outputs/hashes, scores, latency, and GPU telemetry are
+recorded in the JSON.
+
+| Model | JSON / reference-grounding / calibration / contradiction scores | p95 latency | Resident model VRAM | Peak sampled total GPU memory |
+|---|---|---|---|---|
+| `qwen3.5:9b` | 1.00 / 0.99 / 1.00 / 1.00 | 18,580 ms | 5,490,081,790 bytes | 6,973 MiB |
+| `qwen3.5:4b` | 1.00 / 0.99 / 0.9778 / 1.00 | 9,107 ms | 3,128,038,521 bytes | 6,941 MiB |
+
+Both passed the score thresholds. The verified run recommends `qwen3.5:4b`: the 9B model
+exceeded the 15,000 ms p95 resource gate; both were below the 7,500 MiB peak-memory gate.
+Peak sampled temperatures were 57 °C and 71 °C respectively. Total GPU-memory telemetry can
+include other/resident workloads and is not equivalent to the individual model's VRAM size.
+The earlier completed `qwen35_2026-09-03.json` run is retained for comparison; partial JSON files
+are progress artifacts, not completed evidence.
+
+These tests use a templated suite. Grounding checks allowed reference IDs, not semantic
+entailment; the scores do not establish financial correctness or trading profitability.
+The checked-in `config/model.yaml` and `.env.example` now select `qwen3.5:4b`. Check existing
+local environment overrides when starting; they can retain an older model choice. No cloud
+fallback is configured.
+
+## PostgreSQL provisioning boundary
+
+An alternative native PostgreSQL 17.11-3 download was examined in ignored `var/tools/`. The
+archive's PostgreSQL executables are unsigned; none was run. The accompanying EDB installer
+has a Valid Authenticode signature from EnterpriseDB Corporation, certificate thumbprint
+`7BEDD1269FCCF7A5D95F18274750B79893C06C70`.
+
+On this host even the signed installer's `--help` and `--extract-only` invocations require
+elevation. The available `bsdtar` could not extract that installer. No elevation bypass was
+attempted, and no database credentials, service, cluster, or listener were created. The helper
+`scripts/local_postgres.ps1` is a download/signature/extraction audit utility, not a working
+database provisioner. Downloaded files alone do not satisfy the PostgreSQL setup gate.
 
 ## Provisioning actions pending
 
-1. In an elevated PowerShell, enable WSL and Virtual Machine Platform, install/update WSL2 Ubuntu,
-   then reboot.
-2. Set Windows Time to automatic, resynchronize, and verify offset.
-3. Install Docker Desktop with WSL2 backend and Ubuntu integration. Do not also install Docker
-   Engine in that distribution.
-4. Install Ollama natively, pull two benchmark candidates, and validate actual GPU offload with
-   `ollama ps` under repeated structured-output load.
-5. Configure no-sleep AC power behavior and an authenticated Task Scheduler/service startup only
-   after application fault/reconciliation tests pass.
+1. Review and run `scripts/windows/Enable-Platform.ps1` in an elevated PowerShell. It requests
+   Windows feature changes without automatically rebooting. Reboot, then update/install WSL2
+   Ubuntu using the follow-up commands it prints. Earlier `wsl --status` probes hung, so no
+   successful WSL status is claimed here.
+2. Review and run `scripts/windows/Configure-Reliability.ps1` elevated. It configures Windows
+   Time, checks offset, and disables automatic AC sleep; it does not alter firewall or endpoint
+   protection. Re-measure clock health after reboot.
+3. Use `scripts/windows/Install-Dependencies.ps1` to provision missing dependencies. Docker's
+   installer may require UAC/reboot. Enable its WSL2 backend and Ubuntu integration; do not also
+   install Docker Engine in that distribution. Ollama is already installed.
+4. Configure ignored local secrets, start the Compose PostgreSQL/application stack, then verify
+   migrations, database write health, replay persistence, and crash/restart reconciliation on
+   that actual deployment. See `docs/OPERATIONS.md`.
+5. Verify GPU behavior under the intended unattended workload. Register the optional logon
+   startup task only after host reliability and application recovery checks pass.
 
 Scripts under `scripts/windows/` perform auditable checks and safe setup steps; host-elevated and
 rebooting operations remain deliberately separate from application code.

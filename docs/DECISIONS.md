@@ -97,3 +97,41 @@ not automatically looped.
 **Reason:** Repetition must not manufacture fresh observations or qualification sessions. Failed
 callbacks/persistence do not advance the durable group checkpoint; retry/recovery uses stable
 identities and explicitly idempotent consumers.
+
+## ADR-010 — Choose the model that passes measured routine latency
+
+**Date:** 2026-09-03
+**Decision:** Change the checked-in routine model to `qwen3.5:4b`; retain 9B installed
+and preserve both benchmark runs. Keep model-independent trading/risk code.
+**Alternatives:** Keep 9B based only on its earlier faster run or slightly higher
+fixture-calibration score.
+**Reason:** The final 100-case-per-model run measured p95 18,580 ms for 9B and 9,107 ms
+for 4B. Both passed quality thresholds, but only 4B met the 15,000 ms routine latency
+gate. See `MODEL_BENCHMARK.md` for evidence and limitations.
+
+## ADR-011 — Count pending admission and require explicit journal repair
+
+**Date:** 2026-09-03
+**Decision:** Reserve aggregate option risk, position slots, cash, and daily entry
+admission when a simulated entry is accepted, before a fill. Cancellation does not
+refund the daily admission budget. Serialize ExecutionService admission and recheck
+mode, approvals, kill switches, and evidence before transmission.
+**Alternatives:** Count filled positions alone; rely on a periodic health poll.
+**Reason:** Multiple pending orders could otherwise exceed risk limits. A failed
+fill/position journal write latches execution unhealthy until explicit successful
+reconciliation; healthy broker/database probes alone cannot clear it. An empty
+open-order list is not sufficient negative evidence for a timed-out live submission.
+
+## ADR-012 — Separate bounded current-source ingestion from replay
+
+Date: 2026-09-03.
+
+Decision: only explicitly enabled, validated public feeds are polled outside OFFLINE_SIM.
+Store source observations before stable environment-scoped events, repair interrupted event
+persistence from the durable source records, and retain ambiguous revisions without choosing
+an unsupported "latest" claim. Unknown publication time never becomes inferred UTC.
+
+Alternative rejected: poll all example URLs automatically or merge current headlines into
+historical replay. Those approaches conceal missing coverage and violate causal evidence.
+Only the Federal Reserve feed is currently enabled. This does not complete EDGAR, issuer
+mapping, current-market consumption, or authenticated broker integration.

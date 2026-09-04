@@ -16,6 +16,8 @@ def test_checked_in_config_binds_safe_demo(monkeypatch: pytest.MonkeyPatch) -> N
         "SENTRY_DEMO_BACKEND",
         "SENTRY_TRADING_MODE",
         "SENTRY_DATABASE_URL",
+        "SENTRY_OLLAMA_MODEL",
+        "SENTRY_OLLAMA_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     loaded = load_config(Path("config"))
@@ -23,7 +25,7 @@ def test_checked_in_config_binds_safe_demo(monkeypatch: pytest.MonkeyPatch) -> N
     assert binding.environment is ExecutionEnvironment.DEMO
     assert binding.external_write_authority is False
     assert loaded.app.trading_mode is TradingMode.RESEARCH
-    assert loaded.model_provider.model == "qwen3.5:9b"
+    assert loaded.model_provider.model == "qwen3.5:4b"
     assert loaded.model_provider.context_token_limit == 4096
     assert loaded.strategy.options.maximum_candidates_for_judge == 3
     assert len(loaded.sources.official_sources) >= 6

@@ -10,11 +10,49 @@ The reasoning provider receives curated immutable packets and has no shell, file
 configuration, credential, or broker tools. External content is untrusted data; prompt-like text
 inside news or filings is never executed.
 
+The MCP SDK token bridge stores validated token/client records only through
+`ProtectedCredentialStore`; it has no plaintext fallback. Windows installations declare the
+`pywin32` runtime dependency for DPAPI. Records are bound to the fixed MCP endpoint and retain
+token save time; naive/future timestamps, malformed records, and failed protected-store access
+fail with sanitized authentication errors. Use a separate key prefix for each explicitly
+selected account; changing the intended account requires fresh selection and qualification,
+not copying credential files or reusing a prefix. Do not print SDK token/client objects: those
+models themselves contain secret fields.
+
+Keep the Windows credential directory outside OneDrive and the repository, for example under
+`%LOCALAPPDATA%\OptionsSentinel\credentials`. The caller supplies that location; this setup has
+not created credentials there. Verify owner-only NTFS permissions with Windows ACL tools.
+The store's `os.chmod(0o600)` call does not prove that an NTFS ACL excludes other users, and DPAPI
+encryption does not justify syncing credential files or sharing access to the signed-in account.
+
+Normal `ReadOnlyMcpSession` entry requires existing unexpired credentials. Noninteractive OAuth
+callbacks refuse authorization, and 401/403 responses stop before automatic discovery or
+registration. The separate interactive-provider factory is inert until an explicitly invoked
+flow supplies callbacks; no browser/listener or authentication CLI is installed by this work.
+Automatic credential refresh and authenticated reconnect still require implementation and
+qualification; this fail-closed transport is not evidence of unattended broker readiness.
+
 ## Network boundary
 
 The dashboard binds to `127.0.0.1` by default. PostgreSQL is not published by Compose. A private
 VPN may be configured separately; no public inbound port is required. Keep Windows Firewall and
 endpoint protection enabled.
+
+Compose requires `POSTGRES_PASSWORD`; there is no built-in production password fallback.
+Generate a long URL-safe random value and a separate dashboard token in ignored `.env`.
+Do not use the example placeholders. The local control API requires its token, but read-only
+dashboard/API state is intended for the same trusted localhost user, not public hosting.
+Logs recursively redact credential-named fields and URL/bearer credential patterns; arbitrary
+exception text is not displayed by the controller. These filters are defense in depth, not
+permission to log raw authentication responses.
+
+The concrete read-only MCP session pins the endpoint, disables redirects and environment
+proxies, bounds uncached tool discovery, and checks its fixed tool-name allowlist before a
+tool call. A server's `readOnly` annotation cannot authorize unknown, order, watchlist, scan, or
+other mutating names. Mutation schemas may be inspected for hypothetical intent validation
+but cannot be transmitted through this session. SDK roots, sampling, elicitation, and automatic
+input-required retries are not enabled. The session is not connected by default service startup;
+account/schema verification and the separate shadow firewall remain mandatory.
 
 ## Trading authority
 
@@ -39,3 +77,6 @@ authority. `BROKER_SHADOW` always uses a deny-all external-write transport.
 - **Any shadow write transmitted:** critical incident; halt, reconcile, fix the bypass, and restart
   the full qualification window.
 
+Downloaded setup artifacts under ignored `var/tools` are not application credentials.
+The EDB installer has been signature-checked but could not run without elevation. No
+unsigned PostgreSQL executable, OS elevation workaround, or unapproved broker flow was run.
