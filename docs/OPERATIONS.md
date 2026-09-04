@@ -49,7 +49,7 @@ provider. There is no cloud fallback.
 After the host prerequisites and clock checks pass:
 
 1. Run `scripts/windows/Initialize-LocalEnvironment.ps1` using PowerShell 7. It generates
-   independent database/dashboard secrets in `%LOCALAPPDATA%\OptionsSentinel\runtime.env`,
+   independent database/dashboard secrets in `%USERPROFILE%\.options-sentinel\runtime.env`,
    outside the repository and OneDrive, with restricted NTFS permissions. On this machine
    that file already exists: the initializer validates and preserves it. Do not recreate it,
    copy it into `.env`, or display its contents. The initializer only accepts the safe offline
@@ -165,22 +165,35 @@ remain separate explicit user gates after qualification; this runbook does not a
 - Instance lock files under `var/locks/` are intentionally retained. OS locks are released on
   process death; the presence of `demo.lock` or `live.lock` alone is not a stale-lock failure.
   Do not unlink a lock file to bypass another controller.
-- Back up PostgreSQL with `pg_dump` into restricted local storage; never commit dumps. Test
-  restoring into an isolated database before relying on the backup. The isolated test now
-  verifies real backup/restore mechanics and exact simulated journal/ledger restoration, but
-  does not create scheduled operational backups or restore the deployed database.
+- Run `scripts/windows/Backup-Database.ps1` in PowerShell 7. It creates a private custom-format
+  archive under `%USERPROFILE%\.options-sentinel\backups`, checks its index, restores that exact
+  archive transactionally into a uniquely created isolated database, and verifies required
+  schemas. The manifest records checksum, size, restored revision, and the precise verification
+  scope. Credentials never enter command arguments or output. Existing archives are retained.
+  Cleanup drops only the newly created database after verifying its ownership marker, without
+  `FORCE`. The deployed database is never replaced. This is an on-demand backup, not a scheduled
+  retention policy; it excludes filesystem configuration and OAuth. The independent integration
+  test additionally compares complete synthetic ledger/journal rows after restore.
 - If broker authorization is added later, rotate OAuth/session material through the approved
   flow; never put it in prompts, logs, fixtures, or shared diagnostics.
 
 ## Optional logon startup
 
-Only after host reliability and actual deployment recovery checks pass, review and run
-`scripts/windows/Install-StartupTask.ps1` elevated. It registers a limited, interactive-user
+The task `Options Sentinel (Fail-Closed)` is installed and its actual scheduled invocation
+succeeded at 09:44–09:45 ET on September 4. A subsequent full reboot/logon trigger still needs
+verification; a manual scheduled invocation is not that proof. Installation uses
+`scripts/windows/Install-StartupTask.ps1`. It registers a limited, interactive-user
 logon task with duplicate-instance prevention and bounded restart attempts; it is not a
 pre-logon Windows service. The task calls the fail-closed Compose launcher. Docker Desktop and
-Ollama availability at logon still require verification. Use
+Ollama availability after a future logon still requires verification. Use
 `scripts/windows/Remove-StartupTask.ps1` to unregister that task if needed. Neither operation
-is performed automatically by the application, and startup-task installation is not yet claimed.
+is performed automatically by the application.
+
+Windows app packaging redirected the former LocalAppData configuration and Docker storage.
+The private configuration was copied byte-for-byte to the fixed UserProfile path above, with
+the source preserved. A separate native Docker disk now runs the safe offline deployment;
+the earlier disk and a checksum-verified private copy are retained. Do not reset Docker or
+delete either disk. See `DOCKER_RECOVERY_CHECKPOINT.md` before attempting data recovery.
 
 ## Diagnostics
 

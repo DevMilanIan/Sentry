@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -240,6 +241,51 @@ async def test_failed_reconciliation_disables_entries(
     assert not view.reconciled
     assert view.safety.state is RuntimeSafetyState.ENTRY_DISABLED
     assert view.safety.reason == "reconciliation failed"
+
+
+@pytest.mark.parametrize("result", [{"healthy": False}, "false", 1, None])
+@pytest.mark.parametrize("component", ["database", "broker", "execution"])
+async def test_malformed_health_result_never_becomes_successful_evidence(
+    tmp_path: Path, clock: VirtualClock, component: str, result: Any
+) -> None:
+    async def malformed() -> bool:
+        return cast(bool, result)
+
+    controller, view, _ = _controller(
+        tmp_path,
+        clock,
+        repository_health=malformed if component == "database" else _true,
+        broker_health=malformed if component == "broker" else _true,
+        execution_health=malformed if component == "execution" else _true,
+    )
+    await controller.health_once()
+    evidence = view.last_safety_evidence
+    assert evidence is not None
+    observed = {
+        "database": evidence.database_writable,
+        "broker": evidence.broker_state_known,
+        "execution": evidence.execution_service_healthy,
+    }
+    assert observed[component] is False
+    assert not evidence.permits_normal
+    assert not view.safety.permits_new_entry()
+    assert f"{component}-health: TypeError" in view.recent_errors
+    await controller.stop()
+
+
+@pytest.mark.parametrize("result", [{"healthy": False}, "false", 1, None])
+async def test_malformed_reconciliation_result_is_rejected(
+    tmp_path: Path, clock: VirtualClock, result: Any
+) -> None:
+    async def malformed() -> bool:
+        return cast(bool, result)
+
+    controller, view, _ = _controller(tmp_path, clock, reconcile=malformed)
+    assert await controller.reconcile() is False
+    assert view.reconciled is False
+    assert not view.safety.permits_new_entry()
+    assert "reconciliation: TypeError" in view.recent_errors
+    await controller.stop()
 
 
 @pytest.mark.asyncio

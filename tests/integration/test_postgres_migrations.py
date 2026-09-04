@@ -99,7 +99,7 @@ async def test_real_postgres_alembic_fresh_upgrade_and_repeat_are_complete(
     try:
         async with engine.connect() as connection:
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "0002_durable_execution"
+                "0003_closed_trade_outcomes"
             )
             for schema, expected_tables in (
                 ("shared", SHARED_TABLE_NAMES),

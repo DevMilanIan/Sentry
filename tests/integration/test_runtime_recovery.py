@@ -128,6 +128,15 @@ async def test_continuous_runtime_restores_open_order_and_finishes_exit(tmp_path
     assert restored.offline.broker.ledger.cash == Decimal("31.00")
     assert restored.view.replay["live_market_data"] is False
     assert not restored.model_provider.calls  # type: ignore[attr-defined]
+    await restored.offline.review_closed_positions()
+    await restored.offline.review_closed_positions()
+    outcomes = await repo.list_payloads(
+        "trade_outcomes", filters={"record_kind": "closed_position_review"}
+    )
+    assert len(outcomes) == 1
+    assert Decimal(outcomes[0]["payload"]["gross_realized_pnl"]) == Decimal("6")
+    assert outcomes[0]["payload"]["net_realized_pnl"] is None
+    assert outcomes[0]["payload"]["configuration_changes_applied"] is False
     await restored.close()
 
 

@@ -2,6 +2,13 @@
 
 ## Current checkpoint: September 4, 2026
 
+Latest morning incident: Docker crashed on startup (user-confirmed), and its restarted engine
+does not currently expose the earlier application container/storage. The current `sentinel`
+database is fresh and has no application tables. Preserve old storage and investigate before
+claiming deployment continuity. The registered logon task also fails because its process cannot
+see the private environment file, though direct launch can. See the latest DEVLOG entry; the
+successful early-morning deployment described below is historical evidence, not current uptime.
+
 The authorized reboot and post-reboot deployment are complete. Do not repeat installers,
 recreate the private environment, reset the replay cursor, or download the models again.
 Actual PostgreSQL, migrations, backup/restore mechanics, app crash/restart, and database-outage
@@ -17,6 +24,32 @@ Continue source/runtime/federal/evaluation composition and safety verification. 
 OAuth or account mapping is complete; no real qualification sessions, funding, or live trading
 are authorized by the offline deployment. See the latest `DEVLOG.md` entries and `OPERATIONS.md`.
 The historical pre-reboot checklist below is evidence, not an instruction to repeat its steps.
+
+## Historical pre-reboot checkpoint
+
+## Current checkpoint — September 4, 2026, morning ET
+
+Do not repeat installations or model benchmarks. Reboot, WSL/Ubuntu initialization, Docker,
+PostgreSQL, and Ollama setup are complete. The application is running at `127.0.0.1:8000`,
+DEMO/OFFLINE_SIM/RESEARCH/HALTED, with database/model healthy and replay sequence 5 complete.
+This is historical simulation, not a live feed or broker-shadow qualification session.
+
+Private configuration is now `%USERPROFILE%\.options-sentinel\runtime.env`. Its original
+credentials were migrated exactly from the Windows-packaged app's virtualized LocalCache.
+Actual Task Scheduler invocation succeeded on September 4 at 09:44–09:45 ET, resolving the
+previous invisible-config failure. No additional reboot has been performed to test the trigger.
+
+Docker's native restart uses a different data disk. The current offline deployment was rebuilt
+on the fresh volume; it is NOT a recovered original database. The prior 4,369,416,192-byte disk
+and a matching SHA256-verified private copy are preserved; see `DOCKER_RECOVERY_CHECKPOINT.md`.
+The new `Backup-Database.ps1` created an actual protected operational archive and successfully
+restored that exact archive into an isolated ownership-tagged verification database.
+
+Continue implementation and final aggregate verification. Authentication/bootstrap, verified
+broker schemas and market-data/runtime composition, five actual same-account regular shadow
+sessions, funding authorization, and Live activation remain staged work. Do not enable Live,
+request funding early, or treat replay tests as market-session evidence. Latest details are in
+`DEVLOG.md`; the older checkpoint below is historical, not the next-action list.
 
 ## Historical pre-reboot checkpoint
 

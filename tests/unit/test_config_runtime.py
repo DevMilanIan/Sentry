@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.config import AppConfig, DemoProfile, load_config
+from app.config import AppConfig, DemoProfile, SourcesConfig, load_config
 from app.domain.enums import ExecutionEnvironment, TradingMode
 
 
@@ -46,3 +46,18 @@ def test_live_shadow_combination_is_rejected() -> None:
     raw["trading_mode"] = "SHADOW"
     with pytest.raises(ValueError, match=r"LIVE\+SHADOW"):
         AppConfig.model_validate(raw)
+
+
+def test_enabled_official_sources_match_verified_public_feed_checkpoint() -> None:
+    sources = SourcesConfig.model_validate(
+        yaml.safe_load(Path("config/sources.yaml").read_text(encoding="utf-8"))
+    )
+    assert sources.version == "sources-v3-verified-public-agency-feeds"
+    assert {source.id: source.url for source in sources.official_sources if source.enabled} == {
+        "federal_reserve": "https://www.federalreserve.gov/feeds/press_all.xml",
+        "ftc": "https://www.ftc.gov/feeds/press-release.xml",
+        "eia_today_in_energy": "https://www.eia.gov/rss/todayinenergy.xml",
+        "eia_releases": "https://www.eia.gov/about/new/WNtest3.php",
+    }
+    assert sources.poll_seconds >= 900  # Exceeds FTC's observed five-second crawl delay.
+    assert not next(source for source in sources.official_sources if source.id == "sec").enabled

@@ -56,7 +56,7 @@ def _journal(project: Path) -> list[dict[str, object]]:
     allowed = {
         "evidence_version", "run_id", "recorded_at", "process_id", "stage", "status", "error_class",
         "source_script", "source_line", "private_file_exists", "private_file_matches_user_default",
-        "process_local_appdata_matches_user_default",
+        "process_userprofile_matches_user_default",
     }
     assert all(set(row) <= allowed for row in rows)
     return rows

@@ -276,11 +276,64 @@ async def test_service_oauth_challenge_stops_before_discovery(status_code: int) 
 async def test_service_oauth_success_uses_only_original_request() -> None:
     _, storage = await seeded_storage()
     provider = create_noninteractive_oauth_provider(storage, metadata())
+    assert provider.requires_response_body is False
     request = httpx2.Request("POST", MCP_STREAMABLE_HTTP_ENDPOINT)
     flow = provider.async_auth_flow(request)
     assert await anext(flow) is request
     with pytest.raises(StopAsyncIteration):
         await flow.asend(httpx2.Response(200, request=request))
+
+
+async def test_noninteractive_expiry_race_cannot_trigger_sdk_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, storage = await seeded_storage()
+    original_get = storage.get_tokens
+    loads = 0
+
+    async def expires_on_second_load() -> OAuthToken | None:
+        nonlocal loads
+        loads += 1
+        token = await original_get()
+        assert token
+        if loads > 1:
+            token.expires_in = 0
+        return token
+
+    monkeypatch.setattr(storage, "get_tokens", expires_on_second_load)
+    provider = create_noninteractive_oauth_provider(storage, metadata())
+    flow = provider.async_auth_flow(httpx2.Request("POST", MCP_STREAMABLE_HTTP_ENDPOINT))
+    with pytest.raises(AuthenticationRequiredError, match="authorize separately"):
+        await anext(flow)
+    assert loads == 2
+    await flow.aclose()
+
+
+async def test_noninteractive_token_cannot_be_attached_to_another_endpoint() -> None:
+    _, storage = await seeded_storage()
+    provider = create_noninteractive_oauth_provider(storage, metadata())
+    request = httpx2.Request("GET", "https://agent.robinhood.com/arbitrary")
+    flow = provider.async_auth_flow(request)
+    with pytest.raises(AuthenticationRequiredError, match="fixed endpoint"):
+        await anext(flow)
+    assert "Authorization" not in request.headers
+    await flow.aclose()
+
+
+async def test_empty_allowlist_allows_metadata_but_never_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, storage = await seeded_storage()
+    sdk = FakeSdk(pages=[ListToolsResult(tools=[tool("get_accounts")])])
+    sdk.install(monkeypatch)
+    async with ReadOnlyMcpSession(
+        storage=storage, client_metadata=metadata(), allowed_tools=frozenset()
+    ) as session:
+        assert len((await session.list_tools()).tools) == 1
+        for name in ("get_accounts", "get_portfolio", "place_option_order", "anything"):
+            with pytest.raises(SafetyCriticalError, match="allowlist"):
+                await session.call_tool(name, {})
+    assert not sdk.tool_calls
 
 
 async def test_sdk_session_paginated_uncached_and_clean_shutdown(
@@ -331,9 +384,7 @@ async def test_sdk_session_paginated_uncached_and_clean_shutdown(
             pass
 
 
-@pytest.mark.parametrize(
-    "tools", [frozenset(), frozenset({"place_option_order"}), frozenset({"new_get"})]
-)
+@pytest.mark.parametrize("tools", [frozenset({"place_option_order"}), frozenset({"new_get"})])
 async def test_constructor_cannot_expand_static_allowlist(tools: frozenset[str]) -> None:
     _, storage = await seeded_storage()
     with pytest.raises(SafetyCriticalError):

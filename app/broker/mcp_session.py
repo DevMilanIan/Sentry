@@ -206,6 +206,10 @@ async def _deny_callback() -> AuthorizationCodeResult:
 class _NoninteractiveOAuthProvider(OAuthClientProvider):
     """Stop challenged requests before SDK discovery/registration/interactive flow."""
 
+    # A service request only needs the status code. Do not inherit the SDK's
+    # OAuth-discovery body buffering, which would consume an open MCP SSE stream.
+    requires_response_body = False
+
     def __init__(
         self, storage: ProtectedOAuthTokenStorage, client_metadata: OAuthClientMetadata
     ) -> None:
@@ -222,21 +226,21 @@ class _NoninteractiveOAuthProvider(OAuthClientProvider):
         self, request: httpx2.Request
     ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         await self._protected_storage.require_service_credentials()
-        flow = super().async_auth_flow(request)
-        try:
-            outgoing = await anext(flow)
-            while True:
-                response = yield outgoing
-                if response.status_code in {401, 403}:
-                    raise AuthenticationRequiredError(
-                        "MCP authorization expired or denied; authorize separately"
-                    )
-                try:
-                    outgoing = await flow.asend(response)
-                except StopAsyncIteration:
-                    return
-        finally:
-            await flow.aclose()
+        tokens = await self._protected_storage.get_tokens()
+        if tokens is None or (tokens.expires_in is not None and tokens.expires_in <= 0):
+            raise AuthenticationRequiredError("MCP authorization expired; authorize separately")
+        # Do not delegate to SDK auth here: a token can expire between our
+        # precheck and the SDK's second load, triggering its refresh flow before
+        # the challenged-request guard. Service operation sends exactly one
+        # fixed-resource request, never discovery, refresh or authorization.
+        if str(request.url) != MCP_STREAMABLE_HTTP_ENDPOINT:
+            raise AuthenticationRequiredError("MCP service credentials require the fixed endpoint")
+        request.headers["Authorization"] = f"Bearer {tokens.access_token}"
+        response = yield request
+        if response.status_code in {401, 403}:
+            raise AuthenticationRequiredError(
+                "MCP authorization expired or denied; authorize separately"
+            )
 
 
 def create_noninteractive_oauth_provider(
@@ -289,7 +293,7 @@ class ReadOnlyMcpSession:
         max_tools: int = 500,
         request_timeout_seconds: float = 30,
     ) -> None:
-        if not allowed_tools or not allowed_tools.issubset(SUPPORTED_READ_ONLY_TOOLS):
+        if not allowed_tools.issubset(SUPPORTED_READ_ONLY_TOOLS):
             raise SafetyCriticalError("MCP tool allowlist contains unknown or mutating names")
         if (
             type(max_tool_pages) is not int
@@ -303,6 +307,8 @@ class ReadOnlyMcpSession:
         self._storage = storage
         self._metadata = client_metadata.model_copy(deep=True)
         self._allowed = frozenset(allowed_tools)
+        # An empty set is intentionally supported for capability-only sessions:
+        # listing schemas grants no authority to invoke any discovered tool.
         self._max_pages, self._max_tools = max_tool_pages, max_tools
         self._timeout = request_timeout_seconds
         self._client: Client | None = None

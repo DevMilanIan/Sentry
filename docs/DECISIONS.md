@@ -135,3 +135,39 @@ Alternative rejected: poll all example URLs automatically or merge current headl
 historical replay. Those approaches conceal missing coverage and violate causal evidence.
 Only the Federal Reserve feed is currently enabled. This does not complete EDGAR, issuer
 mapping, current-market consumption, or authenticated broker integration.
+
+## ADR-013 — Deadline expiry is an unresolved operation, not permission to retry
+
+Date: 2026-09-04.
+
+Controller health and reconciliation have strict boolean results and monotonic deadlines.
+Timed-out operations latch HALTED and cannot restore health with a late result. A cancelled
+execution may have transmitted bytes; preserve unresolved journal evidence and block further
+writes. Shutdown cannot release its instance lock until all tracked callbacks terminate.
+The alternative of detaching timed-out callbacks and starting another controller could create
+concurrent writes. A process exit releases the OS lock, but restart still requires reconciliation.
+
+## ADR-014 — Shared federal registry records are immutable reference revisions
+
+Date: 2026-09-04.
+
+Keep the existing shared table, append revisions, and serialize parent-check/append in one
+PostgreSQL transaction with an advisory lock. The server supplies record time and actor;
+reference API access always requires the local token. Availability is distinct from publication,
+and historical queries cannot see newly recorded reference knowledge. Source-host approval and
+an operator verification timestamp are not automatic fact verification. No reference score
+changes hard risk or broker authority. See `FEDERAL_REGISTRY.md`.
+
+## ADR-015 — Private operational storage must be shared across launch contexts
+
+Date: 2026-09-04.
+
+Use `%USERPROFILE%\.options-sentinel` outside OneDrive and packaged LocalAppData. Filesystem
+handle evidence proved MSIX redirected the old configuration; the scheduled task could not
+read the same logical path. Explicit migration copies existing credentials exactly and leaves
+the source intact. Do not regenerate credentials or weaken ACLs to solve path virtualization.
+Preserve both Docker disks and inspect a verified copy before any old-data recovery.
+
+Operational backups use pg_dump's consistent archive and verify that exact archive in an
+exclusively created, ownership-tagged disposable database. They never restore over the running
+database. No automatic retention deletion or misleading claim of recovered historical data.

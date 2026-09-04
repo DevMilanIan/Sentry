@@ -1,7 +1,8 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$EnvironmentFile = (Join-Path $env:LOCALAPPDATA 'OptionsSentinel\runtime.env'),
-    [switch]$ValidateOnly
+    [string]$EnvironmentFile = (Join-Path $env:USERPROFILE '.options-sentinel\runtime.env'),
+    [switch]$ValidateOnly,
+    [string]$MigrateFromEnvironmentFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +12,19 @@ function Test-WithinDirectory([string]$Candidate, [string]$Directory) {
     $root = [IO.Path]::GetFullPath($Directory).TrimEnd('\', '/')
     return $Candidate.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
         $Candidate.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-NoReparsePoints([string]$Path) {
+    $ancestor = $Path
+    while ($ancestor) {
+        if (Test-Path -LiteralPath $ancestor) {
+            $item = Get-Item -LiteralPath $ancestor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Reparse points are not supported for the private environment path.'
+            }
+        }
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+    }
 }
 
 function Assert-PrivateAcl([string]$Path, [string[]]$AllowedSids) {
@@ -99,12 +113,15 @@ if (-not [IO.Path]::IsPathRooted($EnvironmentFile) -or $EnvironmentFile.StartsWi
     throw 'The environment file must use an absolute local Windows path.'
 }
 $EnvironmentFile = [IO.Path]::GetFullPath($EnvironmentFile)
-$privateDirectory = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OptionsSentinel'))
+$userProfileDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+# AppData may be virtualized differently inside Codex's MSIX package and Task Scheduler.
+# This fixed profile directory is shared by both execution contexts.
+$privateDirectory = [IO.Path]::GetFullPath((Join-Path $userProfileDirectory '.options-sentinel'))
 if (-not [IO.Path]::GetDirectoryName($EnvironmentFile).Equals($privateDirectory,
         [StringComparison]::OrdinalIgnoreCase) -or
     -not [IO.Path]::GetFileName($EnvironmentFile).Equals('runtime.env',
         [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Use the dedicated LocalAppData\OptionsSentinel\runtime.env path; arbitrary directory ACL changes are not allowed.'
+    throw 'Use the dedicated UserProfile\.options-sentinel\runtime.env path; arbitrary directory ACL changes are not allowed.'
 }
 $projectDirectory = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $forbiddenDirectories = @($projectDirectory)
@@ -122,20 +139,42 @@ foreach ($directory in $forbiddenDirectories) {
     }
 }
 $parentDirectory = [IO.Path]::GetDirectoryName($EnvironmentFile)
-$ancestor = $EnvironmentFile
-while ($ancestor) {
-    if (Test-Path -LiteralPath $ancestor) {
-        $item = Get-Item -LiteralPath $ancestor -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Reparse points are not supported for the private environment path.'
-        }
-    }
-    $ancestor = [IO.Path]::GetDirectoryName($ancestor)
-}
+Assert-NoReparsePoints $EnvironmentFile
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
 
+if ($ValidateOnly -and $MigrateFromEnvironmentFile) {
+    throw 'Validation and migration are separate operations.'
+}
+$legacyRelativePaths = @(
+    'AppData\Local\OptionsSentinel\runtime.env',
+    'AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\OptionsSentinel\runtime.env'
+)
+$legacyPaths = @($legacyRelativePaths | ForEach-Object {
+    [IO.Path]::GetFullPath((Join-Path $userProfileDirectory $_))
+})
+if ($MigrateFromEnvironmentFile) {
+    if (-not [IO.Path]::IsPathRooted($MigrateFromEnvironmentFile) -or
+        $MigrateFromEnvironmentFile.StartsWith('\\')) {
+        throw 'Migration requires an absolute, known local legacy environment path.'
+    }
+    $MigrateFromEnvironmentFile = [IO.Path]::GetFullPath($MigrateFromEnvironmentFile)
+    if ($MigrateFromEnvironmentFile -notin $legacyPaths) {
+        throw 'Migration accepts only the known user-local or Codex-private legacy path.'
+    }
+    Assert-NoReparsePoints $MigrateFromEnvironmentFile
+    if (-not (Test-Path -LiteralPath $MigrateFromEnvironmentFile -PathType Leaf)) {
+        throw 'The selected legacy environment does not exist; no replacement credentials were generated.'
+    }
+    Assert-PrivateAcl ([IO.Path]::GetDirectoryName($MigrateFromEnvironmentFile)) $allowedSids
+    Assert-PrivateAcl $MigrateFromEnvironmentFile $allowedSids
+    Assert-SafeEnvironment $MigrateFromEnvironmentFile
+}
+
 if (Test-Path -LiteralPath $EnvironmentFile -PathType Leaf) {
+    if ($MigrateFromEnvironmentFile) {
+        throw 'Migration refuses an existing destination; existing credentials were not overwritten.'
+    }
     Assert-PrivateAcl $parentDirectory $allowedSids
     Assert-PrivateAcl $EnvironmentFile $allowedSids
     Assert-SafeEnvironment $EnvironmentFile
@@ -143,14 +182,45 @@ if (Test-Path -LiteralPath $EnvironmentFile -PathType Leaf) {
     return
 }
 if ($ValidateOnly) { throw 'The private environment file does not exist; initialize it first.' }
+if (-not $MigrateFromEnvironmentFile -and
+    @($legacyPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count) {
+    throw 'A legacy environment exists. Use explicit migration to preserve its credentials; no replacement credentials were generated.'
+}
 if (-not $PSCmdlet.ShouldProcess($EnvironmentFile, 'Create private demo environment; never overwrite')) {
     return
 }
 
 if (-not (Test-Path -LiteralPath $parentDirectory -PathType Container)) {
     New-Item -ItemType Directory -Path $parentDirectory -Force | Out-Null
+    Set-PrivateAcl $parentDirectory $true $allowedSids
+} else {
+    # Do not repair or take ownership of an existing directory silently.
+    Assert-PrivateAcl $parentDirectory $allowedSids
 }
-Set-PrivateAcl $parentDirectory $true $allowedSids
+
+if ($MigrateFromEnvironmentFile) {
+    $sourceStream = $null
+    $destinationStream = $null
+    try {
+        # Copy exact bytes under an exclusive source read lock. Never regenerate,
+        # rewrite, delete, or alter the legacy credential file.
+        $sourceStream = [IO.File]::Open($MigrateFromEnvironmentFile, [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $destinationStream = [IO.File]::Open($EnvironmentFile, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $sourceStream.CopyTo($destinationStream)
+        $destinationStream.Flush($true)
+    } catch {
+        throw 'Private environment migration failed. Existing files were not overwritten; inspect permissions and completeness without printing contents.'
+    } finally {
+        if ($destinationStream) { $destinationStream.Dispose() }
+        if ($sourceStream) { $sourceStream.Dispose() }
+    }
+    Set-PrivateAcl $EnvironmentFile $false $allowedSids
+    Assert-SafeEnvironment $EnvironmentFile
+    Write-Host 'Copied existing private demo credentials exactly; the legacy file was preserved. No credential values were displayed.'
+    return
+}
 
 $random = [Security.Cryptography.RandomNumberGenerator]::Create()
 $bytes = New-Object byte[] 32

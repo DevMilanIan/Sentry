@@ -200,3 +200,65 @@ the following original remaining-work list predates the late-evening installs.
 - This is an offline deployment/recovery milestone, not V1 or full-project completion. No
   Robinhood OAuth, real market/account connection, broker-shadow session, funding, or real trade
   has occurred. Runtime/source/federal/evaluation composition gaps and future user gates remain.
+
+## 2026-09-04 — Continued implementation and Docker startup incident
+
+- Added bounded controller health/reconciliation and job deadlines, strict boolean health
+  results, latched timeout halts, and tracking of cancellation-resistant callbacks. Shutdown
+  retains the OS instance lock while callbacks remain active; runtime close can retry an
+  incomplete stop. Real startup health windows now use monotonic elapsed time, not wall-clock
+  jumps. Interrupted broker writes are classified conservatively and never automatically retried.
+- Added the append-only, authenticated federal reference registry with server-stamped revisions,
+  causal snapshots, complete history, explicit scan bounds, source-policy validation, and
+  PostgreSQL transaction-scoped writer serialization. The composed API uses the wall clock,
+  not the offline fixture clock. No factual relationship records were seeded.
+- Hardened both stdlib and structured JSON logs and CLI errors against raw credential-bearing
+  exception output. Dashboard now explicitly labels simulated account observations and completed
+  historical replay; failed refreshes mark the display stale.
+- Pinned the actually verified Linux dependency resolution and Python/PostgreSQL image digests.
+  Ordinary logon startup never rebuilds or pulls images; updates remain an intentional operation.
+- Logon task registration succeeded, but actual task runs failed while the identical command
+  launched directly passed. Per-run, credential-free diagnostics show the scheduled context
+  cannot see the private environment file. No ACL was weakened and no credentials were printed.
+  Storage-context diagnosis is still in progress; successful unattended startup is NOT claimed.
+- At the user's September 4 morning continuation, Docker was a newly started process (09:23 ET).
+  Its current engine (`058cd891-88ef-4490-97ee-a3958926c8cb`) had no earlier application container;
+  the verification command created a new named volume at 13:26:49 UTC. User confirmed Docker
+  crashed on startup. The current deployed `sentinel` database has zero application tables;
+  do not silently present it as the earlier recovered deployment. Original storage is being
+  investigated and must be preserved. No cleanup/reset command removed the old volume here.
+- New full Linux test run passed 563 cases, skipped 24 Windows-only cases, and failed one stale
+  source-string startup assertion after diagnostic allowlists were added. All real PostgreSQL
+  cases, including two federal concurrency/restart cases, passed. Native run similarly passed
+  573, skipped 14 PostgreSQL cases, and hit the same assertion. The assertion now checks actual
+  invocation order. Subsequent controller/cancellation fixes still need aggregate reruns.
+
+## 2026-09-04 — Startup repaired and operational protection restored
+
+- Proved Windows MSIX path redirection with the filesystem handle's physical path. The
+  private environment was under the Codex package's LocalCache, invisible to Task Scheduler.
+  Migrated exact bytes into `%USERPROFILE%\.options-sentinel\runtime.env`, outside AppData
+  virtualization and OneDrive. Existing credentials and legacy file were preserved. Native
+  startup/diagnostic migration regressions passed (32 focused cases).
+- Rebuilt the safe application on Docker's current native engine. Actual Task Scheduler
+  invocation completed with result 0 at 09:44–09:45 ET, and again after the model fault test.
+  API confirms DEMO/OFFLINE_SIM/RESEARCH/HALTED, database/model healthy, reconciled, replay
+  sequence 5 complete, no positions/orders, and zero real qualification sessions. This is a
+  fresh offline deployment, not recovered original storage. A new reboot/logon was not tested.
+- Confirmed distinct native and packaged Docker VHDXs. Preserved the inactive earlier disk and
+  a 4,369,416,192-byte copy outside OneDrive, with matching SHA256 and unchanged source time.
+  See `DOCKER_RECOVERY_CHECKPOINT.md`; no old rows are claimed recovered.
+- Added a real operational backup command: fixed private local destination, signed/pinned
+  local Docker access, no credential argv/output, consistent custom-format pg_dump, archive
+  index validation, SHA256 manifest, and isolated transactional pg_restore/schema verification.
+  Actual archive `20260904T134952896Z-e6845206681a47a7a55b9b4039abcdeb` (302,283 bytes)
+  restored successfully. Only the newly created ownership-tagged database and UUID temporary
+  container dump were removed; private archives remain available. Backups are not scheduled.
+- Native Ollama fault injection stopped only verified installed model processes while the
+  empty offline service remained HALTED. Model loss was detected in 30.2 seconds; database
+  health and replay cursor 5 remained intact. Finally invoked the actual startup task; result
+  0 restored dependencies. No model downloads, broker calls, or real orders were involved.
+- Replaced chmod-only credential protection with actual protected NTFS ACL enforcement,
+  reparse/OneDrive/workspace/hardlink rejection, exclusive random temporary files and atomic
+  replacement. Mandatory user-bound DPAPI and native fixture regressions passed; no production
+  OAuth credentials were stored. Sixty focused credential/MCP cases passed.

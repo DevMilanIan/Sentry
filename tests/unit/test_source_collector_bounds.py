@@ -73,3 +73,33 @@ async def test_trickling_feed_has_total_wall_time_bound(clock: VirtualClock) -> 
     with pytest.raises(TransientError, match="unavailable"):
         async with asyncio.timeout(1):
             await collector.fetch("fixture", "https://agency.gov/feed")
+
+
+async def test_collector_negotiates_official_text_xml_without_changing_identity(
+    clock: VirtualClock,
+) -> None:
+    def response(request: httpx.Request) -> httpx.Response:
+        assert request.headers["User-Agent"] == "OptionsSentinel fixture"
+        accepted = {value.strip() for value in request.headers["Accept"].split(",")}
+        if "text/xml" not in accepted:
+            return httpx.Response(406)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/xml; charset=UTF-8"},
+            content=(
+                b"<rss><channel><item><title>Official release</title>"
+                b"<link>https://agency.gov/release</link>"
+                b"<pubDate>Thu, 03 Sep 2026 12:00:00 GMT</pubDate>"
+                b"</item></channel></rss>"
+            ),
+        )
+
+    collector = OfficialSourceCollector(
+        clock,
+        user_agent="OptionsSentinel fixture",
+        transport=httpx.MockTransport(response),
+    )
+    documents = await collector.fetch("fixture", "https://agency.gov/feed")
+    assert len(documents) == 1
+    assert documents[0].publication_time is not None
+    assert documents[0].canonical_url == "https://agency.gov/release"

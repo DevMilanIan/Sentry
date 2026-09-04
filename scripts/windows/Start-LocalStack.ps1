@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$ProjectDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
-    [string]$EnvironmentFile = (Join-Path $env:LOCALAPPDATA 'OptionsSentinel\runtime.env')
+    [string]$EnvironmentFile = (Join-Path $env:USERPROFILE '.options-sentinel\runtime.env')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,7 +35,7 @@ function Write-StartupEvidence {
         $entry.source_line = $SourceLine
     }
     foreach ($key in @('private_file_exists', 'private_file_matches_user_default',
-            'process_local_appdata_matches_user_default')) {
+            'process_userprofile_matches_user_default')) {
         if ($Facts.ContainsKey($key)) { $entry[$key] = [bool]$Facts[$key] }
     }
     $Writer.WriteLine(($entry | ConvertTo-Json -Compress))
@@ -76,14 +76,14 @@ try {
     $journalStream = [IO.FileStream]::new($journalPath, [IO.FileMode]::CreateNew,
         [IO.FileAccess]::Write, [IO.FileShare]::Read)
     $startupJournal = [IO.StreamWriter]::new($journalStream, [Text.UTF8Encoding]::new($false))
-    $userLocalAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    $expectedPrivateFile = Join-Path $userLocalAppData 'OptionsSentinel\runtime.env'
+    $userProfileDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $expectedPrivateFile = Join-Path $userProfileDirectory '.options-sentinel\runtime.env'
     $startupFacts = @{
         private_file_exists = Test-Path -LiteralPath $EnvironmentFile -PathType Leaf
         private_file_matches_user_default = [IO.Path]::GetFullPath($EnvironmentFile).Equals(
             [IO.Path]::GetFullPath($expectedPrivateFile), [StringComparison]::OrdinalIgnoreCase)
-        process_local_appdata_matches_user_default = [IO.Path]::GetFullPath($env:LOCALAPPDATA).Equals(
-            [IO.Path]::GetFullPath($userLocalAppData), [StringComparison]::OrdinalIgnoreCase)
+        process_userprofile_matches_user_default = [IO.Path]::GetFullPath($env:USERPROFILE).Equals(
+            [IO.Path]::GetFullPath($userProfileDirectory), [StringComparison]::OrdinalIgnoreCase)
     }
     Write-StartupEvidence $startupJournal $startupId $startupStage 'succeeded' -Facts $startupFacts
 

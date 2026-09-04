@@ -37,7 +37,7 @@ if (-not (Test-Path -LiteralPath .venv)) { python -m venv .venv }
 Or start PostgreSQL and the application:
 
 ```powershell
-# PowerShell 7; preserves the existing private LocalAppData environment.
+# PowerShell 7; preserves UserProfile\.options-sentinel\runtime.env.
 .\scripts\windows\Initialize-LocalEnvironment.ps1
 .\scripts\windows\Start-LocalStack.ps1
 ```

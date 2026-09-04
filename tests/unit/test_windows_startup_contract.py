@@ -51,7 +51,10 @@ def test_readiness_probes_have_one_deadline_and_only_local_endpoints() -> None:
 
 def test_logon_wrapper_waits_before_stack_and_restores_process_environment() -> None:
     source = script("Start-LocalStack")
-    assert source.index("'Ensure-LocalDependencies.ps1'") < source.index("'Start-Sentinel.ps1'")
+    # Diagnostic allowlists may mention either filename before invocation.
+    assert source.index("& (Join-Path $PSScriptRoot 'Ensure-LocalDependencies.ps1')") < (
+        source.index("& (Join-Path $PSScriptRoot 'Start-Sentinel.ps1')")
+    )
     assert "$env:DOCKER_HOST = $dependencies.DockerHost" in source
     assert "$env:PATH = (Split-Path -Parent $dependencies.DockerCli)" in source
     assert 'Exists = Test-Path -LiteralPath "Env:$key"' in source

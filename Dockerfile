@@ -23,6 +23,6 @@ COPY tests ./tests
 COPY docker-compose.yml Dockerfile ./
 COPY scripts/windows ./scripts/windows
 USER sentinel
-CMD ["python", "-m", "pytest", "tests/integration/test_postgres_live.py", "tests/integration/test_postgres_migrations.py", "tests/integration/test_postgres_backup_restore.py", "tests/integration/test_federal_registry_postgres.py", "-q", "-p", "no:cacheprovider"]
+CMD ["python", "-m", "pytest", "tests/integration/test_postgres_live.py", "tests/integration/test_postgres_migrations.py", "tests/integration/test_postgres_backup_restore.py", "tests/integration/test_federal_registry_postgres.py", "tests/integration/test_trade_outcomes_postgres.py", "tests/integration/test_live_surveillance_postgres.py", "-q", "-p", "no:cacheprovider"]
 
 FROM base AS runtime

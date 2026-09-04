@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -213,6 +213,17 @@ def create_app(
     @application.get("/api/notifications")
     async def notifications() -> list[dict[str, Any]]:
         return await repository.list("notification_events", limit=50)
+
+    @application.get("/api/trade-outcomes")
+    async def trade_outcomes(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
+        rows = await repository.list("trade_outcomes", limit=limit)
+        if any(
+            row.get("environment") != view.binding.environment.value
+            or row.get("namespace") != view.binding.idempotency_namespace
+            for row in rows
+        ):
+            raise HTTPException(status_code=503, detail="outcome namespace validation failed")
+        return rows
 
     @application.get("/api/reports")
     async def reports() -> list[dict[str, Any]]:

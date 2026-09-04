@@ -32,6 +32,7 @@ from app.domain.models import (
 from app.exceptions import SafetyCriticalError
 from app.execution.postgres_store import PostgresExecutionStore
 from app.execution.service import DuplicateOrderError, ExecutionDenied, ExecutionService
+from app.learning.outcomes import ClosedPositionReviewWorker
 from app.market.models import ReplayFixture
 from app.positions.manager import ExitPolicy, PositionManager
 from app.risk.engine import RiskEngine
@@ -227,6 +228,14 @@ class OfflineRuntime:
             proposal = await self.candidate_worker.on_event(event, self.session.market)
             if proposal is not None:
                 await self.add_proposal(proposal)
+
+    async def review_closed_positions(self) -> None:
+        # Order state and fills are separate durable writes. Share the lifecycle
+        # lock so the reviewer cannot mistake an in-progress sync for lost fills.
+        async with self._lock:
+            if not self._journal_healthy or self._requires_reconciliation:
+                return
+            await ClosedPositionReviewWorker(self.repository, self.clock).tick()
 
     async def _consume_quote(self, quote: OptionQuote) -> None:
         await self.broker.consume_quote(quote)

@@ -285,3 +285,69 @@ async def test_queued_proposal_cannot_enter_broker_after_cancelled_command(
         await queued
     assert broker.calls == ["place"]
     assert safety.state is RuntimeSafetyState.HALTED
+
+
+@pytest.mark.parametrize("environment", list(ExecutionEnvironment))
+@pytest.mark.parametrize("action", ["place", "cancel"])
+@pytest.mark.parametrize("stage", ["save", "transition"])
+async def test_post_response_cancellation_preserves_evidence_and_blocks_queued_proposals(
+    clock: VirtualClock,
+    proposal: TradeProposal,
+    environment: ExecutionEnvironment,
+    action: str,
+    stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, broker, store, safety, trade = _service(clock, proposal, environment, "")
+    target = (await service.execute(trade)).broker_order if action == "cancel" else None
+    observed_state = OrderState.OPEN if action == "place" else OrderState.CANCELED
+    journal_entered = asyncio.Event()
+    original_save = store.save_order
+    original_transition = store.record_transition
+
+    async def block_response_save(order: BrokerOrder) -> None:
+        if order.state is observed_state:
+            journal_entered.set()
+            await asyncio.Event().wait()
+        await original_save(order)
+
+    async def block_response_transition(record: StateTransitionRecord) -> None:
+        if record.current is observed_state:
+            journal_entered.set()
+            await asyncio.Event().wait()
+        await original_transition(record)
+
+    if stage == "save":
+        monkeypatch.setattr(store, "save_order", block_response_save)
+    else:
+        monkeypatch.setattr(store, "record_transition", block_response_transition)
+    if target is None:
+        first = asyncio.create_task(service.execute(trade))
+    else:
+        first = asyncio.create_task(service.cancel_order(target))  # type: ignore[assignment]
+    await asyncio.wait_for(journal_entered.wait(), timeout=1)
+    observed_order = broker.memory_orders["memory-order"]
+    calls_after_response = list(broker.calls)
+    changed = trade.model_copy(update={"proposal_id": uuid4(), "limit_price": Decimal("0.09")})
+    queued = asyncio.create_task(service.execute(changed))
+    first.cancel("post-response cancellation")
+    with pytest.raises(asyncio.CancelledError, match="post-response cancellation"):
+        await first
+    with pytest.raises(ExecutionDenied, match="interrupted write latch"):
+        await queued
+
+    interrupted_id = next(iter(service.interrupted_write_intents))
+    unknown = store.orders[interrupted_id]
+    assert unknown.state is OrderState.SUBMISSION_UNKNOWN
+    assert unknown.order_id == observed_order.order_id
+    assert unknown.broker_order_id == observed_order.broker_order_id
+    assert unknown.contract == observed_order.contract
+    assert unknown.quantity == observed_order.quantity
+    assert unknown.limit_price == observed_order.limit_price
+    assert unknown.filled_quantity == observed_order.filled_quantity
+    assert unknown.intent_id == interrupted_id
+    assert safety.state is RuntimeSafetyState.HALTED
+    assert broker.calls == calls_after_response
+    assert f"response {observed_state.value}" in store.transitions[-1].reason
+    assert "local order journal incomplete" in store.transitions[-1].reason
+    assert "acceptance is unproven" not in store.transitions[-1].reason

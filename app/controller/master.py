@@ -159,6 +159,8 @@ class MasterController:
             result = await self._run_bounded(
                 "reconciliation", self._reconcile, self._health_timeout_seconds
             )
+            if type(result) is not bool:
+                raise TypeError("reconciliation callback must return an actual boolean")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -303,7 +305,10 @@ class MasterController:
             self._enforce_timeout_latch()
             return False
         try:
-            return await self._run_bounded(key, callback, self._health_timeout_seconds)
+            result = await self._run_bounded(key, callback, self._health_timeout_seconds)
+            if type(result) is not bool:
+                raise TypeError("health callback must return an actual boolean")
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as exc:

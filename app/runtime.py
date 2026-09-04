@@ -19,6 +19,8 @@ from app.db.repository import InMemoryAuditRepository, PostgresAuditRepository
 from app.db.session import DatabaseManager
 from app.demo.runtime import OfflineRuntime
 from app.domain.enums import DemoBackend, ExecutionEnvironment
+from app.learning.outcomes import ClosedPositionReviewWorker
+from app.market.base import MarketDataProvider
 from app.market.models import ReplayFixture
 from app.observability.metrics import MetricsRegistry
 from app.reasoning.ollama import OllamaModelProvider
@@ -26,6 +28,8 @@ from app.reasoning.provider import LocalModelProvider
 from app.reporting.operational import OperationalSnapshot
 from app.reporting.runtime import RuntimeReporter, snapshot_from_view
 from app.safety.runtime_state import SafetyController
+from app.sentinel.live_reads import LiveReadSurveillanceWorker
+from app.strategy.live_research import LiveMarketResearchQueue
 from app.strategy.runtime import CandidateResearchWorker
 
 
@@ -40,6 +44,7 @@ class ApplicationRuntime:
     model_provider: LocalModelProvider
     application: FastAPI
     offline: OfflineRuntime | None = None
+    market_provider: MarketDataProvider | None = None
     _closed: bool = False
 
     async def close(self) -> None:
@@ -51,8 +56,12 @@ class ApplicationRuntime:
         try:
             await self.model_provider.close()
         finally:
-            if self.database is not None:
-                await self.database.close()
+            try:
+                if self.market_provider is not None:
+                    await self.market_provider.close()
+            finally:
+                if self.database is not None:
+                    await self.database.close()
         self._closed = True
 
 
@@ -64,9 +73,15 @@ async def build_application(
     model_provider: LocalModelProvider | None = None,
     wall_clock: Clock | None = None,
     fixture: ReplayFixture | None = None,
+    market_provider: MarketDataProvider | None = None,
+    market_watchlist: tuple[str, ...] = (),
 ) -> ApplicationRuntime:
     """Compose production services; in-memory persistence is explicit test injection only."""
     binding = loaded.bind_runtime()
+    if market_provider is not None and binding.demo_backend is not DemoBackend.BROKER_SHADOW:
+        raise ValueError("current-data injection requires DEMO/BROKER_SHADOW")
+    if bool(market_watchlist) != (market_provider is not None):
+        raise ValueError("current-data injection requires both a provider and explicit watchlist")
     clock = wall_clock or RealClock()
     safety = SafetyController(
         clock, timedelta(seconds=loaded.app.runtime.startup_health_window_seconds)
@@ -97,7 +112,21 @@ async def build_application(
     )
     offline: OfflineRuntime | None = None
     broker: BrokerAccountExecution | None = None
+    surveillance: LiveReadSurveillanceWorker | None = None
+    research_queue: LiveMarketResearchQueue | None = None
     try:
+        if market_provider is not None:
+            surveillance = LiveReadSurveillanceWorker(
+                market_provider, clock, audit, watchlist=market_watchlist
+            )
+            researcher = CandidateResearchWorker(
+                loaded,
+                clock,
+                audit,
+                provider,
+                policy_profile=loaded.decision_policies.profiles["DEMO_EXPLORATORY"],
+            )
+            research_queue = LiveMarketResearchQueue(audit, clock, market_provider, researcher)
         if binding.demo_backend is DemoBackend.OFFLINE_SIM:
             if fixture is None:
                 raw = await asyncio.to_thread(
@@ -114,12 +143,21 @@ async def build_application(
             )
             broker = offline.broker
     except BaseException:
-        await provider.close()
-        if database is not None:
-            await database.close()
+        try:
+            await provider.close()
+        finally:
+            try:
+                if market_provider is not None:
+                    await market_provider.close()
+            finally:
+                if database is not None:
+                    await database.close()
         raise
 
     async def broker_health() -> bool:
+        if surveillance is not None:
+            # Re-evaluate age on every health tick, not only the five-minute scan.
+            view.market_data_fresh = await surveillance.health()
         if broker is None:
             return False
         report = await broker.reconcile()
@@ -217,7 +255,50 @@ async def build_application(
         controller.add_job(
             PeriodicJob("official_sources", loaded.sources.poll_seconds, source_worker.poll)
         )
+        if surveillance is not None:
+
+            async def scan_current_market() -> None:
+                assert surveillance is not None
+                try:
+                    await surveillance.tick()
+                    view.market_data_fresh = await surveillance.health()
+                    view.last_scan_at = clock.now().isoformat()
+                except BaseException:
+                    view.market_data_fresh = False
+                    raise
+
+            controller.add_job(
+                PeriodicJob(
+                    "current_market_surveillance",
+                    loaded.app.sentinel.equity_scan_seconds,
+                    scan_current_market,
+                    timeout_seconds=45,
+                )
+            )
+
+            async def research_pending_market_event() -> None:
+                assert research_queue is not None
+                proposal = await research_queue.tick()
+                if proposal is not None:
+                    # Proposal visibility is not execution authority. The credentialed
+                    # broker/execution composition remains absent and fail-closed.
+                    view.proposals[proposal.proposal_id] = proposal
+
+            controller.add_job(
+                PeriodicJob(
+                    "market_event_research", 5, research_pending_market_event, timeout_seconds=210
+                )
+            )
     trading_clock = offline.clock if offline is not None else clock
+    outcome_worker = ClosedPositionReviewWorker(audit, trading_clock)
+
+    async def review_closed_positions() -> None:
+        if offline is not None:
+            await offline.review_closed_positions()
+        else:
+            await outcome_worker.tick()
+
+    controller.add_job(PeriodicJob("closed_position_review", 60, review_closed_positions))
 
     async def operational_snapshot() -> OperationalSnapshot:
         await monitor_account_state()
@@ -241,7 +322,16 @@ async def build_application(
         reference_clock=clock,
     )
     runtime = ApplicationRuntime(
-        loaded, database, audit, view, controller, broker, provider, application, offline
+        loaded,
+        database,
+        audit,
+        view,
+        controller,
+        broker,
+        provider,
+        application,
+        offline,
+        market_provider=market_provider,
     )
 
     @asynccontextmanager

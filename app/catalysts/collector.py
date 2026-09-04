@@ -149,7 +149,9 @@ class OfficialSourceCollector:
             raise DataInvalidError("official source URL must be credential-free HTTPS")
         headers = {
             "User-Agent": self._user_agent,
-            "Accept": "application/rss+xml, application/atom+xml, application/xml",
+            # Official EIA feeds negotiate text/xml and return HTTP 406 without it.
+            # Both XML media types still pass through the same bounded, safe parser.
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
         }
         try:
             async with asyncio.timeout(self._timeout), httpx.AsyncClient(

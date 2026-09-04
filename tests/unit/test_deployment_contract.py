@@ -113,7 +113,8 @@ def test_compose_private_environment_path_and_password_have_no_secret_default() 
 
 def test_windows_initializer_contract_keeps_secrets_external_private_and_create_new() -> None:
     script = Path("scripts/windows/Initialize-LocalEnvironment.ps1").read_text(encoding="utf-8")
-    assert "OptionsSentinel\\runtime.env" in script
+    assert "Join-Path $env:USERPROFILE '.options-sentinel\\runtime.env'" in script
+    assert "[Environment+SpecialFolder]::UserProfile" in script
     assert "Security.Cryptography.RandomNumberGenerator" in script
     assert "New-Object byte[] 32" in script
     assert "[IO.FileMode]::CreateNew" in script
@@ -138,6 +139,31 @@ def test_windows_initializer_contract_keeps_secrets_external_private_and_create_
             assert "$dashboardToken" not in line
             assert "$content" not in line
             assert "$settings" not in line
+
+
+def test_windows_legacy_environment_migration_is_explicit_exact_and_non_destructive() -> None:
+    script = Path("scripts/windows/Initialize-LocalEnvironment.ps1").read_text(encoding="utf-8")
+    assert "[string]$MigrateFromEnvironmentFile" in script
+    assert "OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\OptionsSentinel\\runtime.env" in script
+    assert "$MigrateFromEnvironmentFile -notin $legacyPaths" in script
+    assert "Assert-NoReparsePoints $MigrateFromEnvironmentFile" in script
+    assert "Assert-PrivateAcl $MigrateFromEnvironmentFile $allowedSids" in script
+    assert "Assert-SafeEnvironment $MigrateFromEnvironmentFile" in script
+    assert "Migration refuses an existing destination" in script
+    assert "A legacy environment exists. Use explicit migration" in script
+    assert "$sourceStream.CopyTo($destinationStream)" in script
+    assert script.index("$sourceStream.CopyTo($destinationStream)") < script.index(
+        "$random = [Security.Cryptography.RandomNumberGenerator]::Create()"
+    )
+    assert "Remove-Item" not in script
+    assert "Move-Item" not in script
+
+
+def test_windows_startup_defaults_do_not_depend_on_virtualized_appdata() -> None:
+    for name in ("Initialize-LocalEnvironment", "Start-Sentinel", "Start-LocalStack"):
+        source = Path(f"scripts/windows/{name}.ps1").read_text(encoding="utf-8")
+        assert "Join-Path $env:USERPROFILE '.options-sentinel\\runtime.env'" in source
+        assert "$env:LOCALAPPDATA" not in source
 
 
 def test_windows_startup_uses_same_file_for_both_compose_environment_mechanisms() -> None:

@@ -112,3 +112,13 @@ failure output is suppressed. Three local subprocess/environment cases test
 these boundaries separately from the one actual database roundtrip. This is a
 synthetic restore drill, not a verified restore of an operational backup, and
 does not establish backup retention, encryption, or recovery-time objectives.
+
+## Current-data and review recovery
+
+The verification target also includes `test_trade_outcomes_postgres.py` (separate-pool
+writer races, immutable review identities, and restart preservation) and
+`test_live_surveillance_postgres.py` (snapshot/event gap repair, stable event IDs across
+new clients, and explicit namespace filtering of shared market snapshots). All use the
+existing fresh ownership-checked schema fixture and synthetic data, never authenticated
+account data. The operational `Backup-Database.ps1` is a separate Windows command that
+now creates and verifies a real deployed database archive without replacing production.

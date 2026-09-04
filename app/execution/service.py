@@ -490,13 +490,17 @@ class ExecutionService:
                     "broker response cannot be correlated to durable intent"
                 )
             raise SafetyCriticalError("simulated/shadow broker returned an uncorrelated order")
-        await self._store.save_order(order)
-        await self._transition(
-            intent.intent_id,
-            OrderState.SUBMITTING,
-            order.state,
-            "broker order state observed",
-        )
+        try:
+            await self._store.save_order(order)
+            await self._transition(
+                intent.intent_id,
+                OrderState.SUBMITTING,
+                order.state,
+                "broker order state observed",
+            )
+        except asyncio.CancelledError:
+            await self._record_interrupted_write(pending, "placement", observed=order)
+            raise
         return ExecutionResult(intent, command, risk, review, order)
 
     async def execute_entry(
@@ -674,16 +678,22 @@ class ExecutionService:
             ) from exc
 
         correlated = result.model_copy(update={"intent_id": intent.intent_id})
-        await self._store.save_order(correlated)
-        await self._transition(
-            intent.intent_id,
-            OrderState.SUBMITTING,
-            correlated.state,
-            "broker cancellation state observed",
-        )
+        try:
+            await self._store.save_order(correlated)
+            await self._transition(
+                intent.intent_id,
+                OrderState.SUBMITTING,
+                correlated.state,
+                "broker cancellation state observed",
+            )
+        except asyncio.CancelledError:
+            await self._record_interrupted_write(pending, "cancellation", observed=correlated)
+            raise
         return CancellationResult(intent, command, correlated)
 
-    async def _record_interrupted_write(self, pending: BrokerOrder, action: str) -> None:
+    async def _record_interrupted_write(
+        self, pending: BrokerOrder, action: str, *, observed: BrokerOrder | None = None
+    ) -> None:
         """Classify cancellation without swallowing it or replaying the command.
 
         Task cancellation is not proof that the broker failed to accept bytes.
@@ -697,16 +707,26 @@ class ExecutionService:
         """
         self._interrupted_write_intents.add(pending.intent_id)
         self._safety.emergency_stop("interrupted broker command requires reconciliation")
+        # Preserve exact response IDs, terms, and fill information if the broker
+        # returned before cancellation. UNKNOWN describes incomplete durable
+        # local processing, not a claim that no response was observed.
+        interrupted = observed if observed is not None else pending
+        reason = (
+            f"task cancelled after broker {action} response {observed.state.value}; "
+            "local order journal incomplete; reconciliation required"
+            if observed is not None
+            else f"task cancelled during broker {action}; acceptance is unproven"
+        )
         try:
             async with asyncio.timeout(self._cancellation_audit_timeout_seconds):
                 await self._store.save_order(
-                    pending.model_copy(update={"state": OrderState.SUBMISSION_UNKNOWN})
+                    interrupted.model_copy(update={"state": OrderState.SUBMISSION_UNKNOWN})
                 )
                 await self._transition(
                     pending.intent_id,
                     OrderState.SUBMITTING,
                     OrderState.SUBMISSION_UNKNOWN,
-                    f"task cancelled during broker {action}; acceptance is unproven",
+                    reason,
                 )
         except asyncio.CancelledError:
             # A second cancellation must not replace the caller's original one.

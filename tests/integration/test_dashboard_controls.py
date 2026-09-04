@@ -40,3 +40,31 @@ def test_controls_require_token_and_emergency_stop_is_audited(
         assert accepted.status_code == 200
         assert accepted.json()["state"] == RuntimeSafetyState.HALTED.value
         assert config.runtime.disabled_file.is_file()
+
+
+async def test_trade_outcomes_are_bounded_and_reject_foreign_namespace(clock, demo_binding) -> None:
+    config = load_config().app
+    repository = InMemoryAuditRepository(demo_binding)
+    view = RuntimeView(
+        binding=demo_binding,
+        trading_mode=config.trading_mode,
+        safety=SafetyController(clock, timedelta(seconds=30)),
+    )
+    await repository.append(
+        "trade_outcomes",
+        {
+            "created_at": clock.now(),
+            "record_kind": "closed_position_review",
+            "gross_realized_pnl": "6",
+            "net_realized_pnl": None,
+        },
+    )
+    client = TestClient(create_app(config, view, repository, clock, MetricsRegistry()))
+    response = client.get("/api/trade-outcomes?limit=1")
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert response.json()[0]["payload"]["net_realized_pnl"] is None
+    assert client.get("/api/trade-outcomes?limit=201").status_code == 422
+    assert client.get("/api/trade-outcomes?limit=0").status_code == 422
+    repository._rows["trade_outcomes"][0]["namespace"] = "different-runtime"
+    assert client.get("/api/trade-outcomes").status_code == 503

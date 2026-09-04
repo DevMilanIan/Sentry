@@ -2,7 +2,7 @@
 param(
     [string]$ProjectDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EnvironmentFile = $(if ($env:SENTRY_ENV_FILE) { $env:SENTRY_ENV_FILE } else {
-        Join-Path $env:LOCALAPPDATA 'OptionsSentinel\runtime.env'
+        Join-Path $env:USERPROFILE '.options-sentinel\runtime.env'
     }),
     [switch]$Build
 )

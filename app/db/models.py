@@ -48,6 +48,7 @@ EXECUTION_UNIQUE_KEYS: dict[str, tuple[str, ...]] = {
         "idempotency_key",
     ),
     "fills": ("fill_id",),
+    "trade_outcomes": ("outcome_id",),
     "environment_audit_events": ("transition_id",),
     "reconciliation_events": ("reconciliation_id", "negative_reconciliation_id"),
 }
