@@ -103,6 +103,41 @@ class RobinhoodReadReviewClient(Protocol):
         raise NotImplementedError
 
 
+class SelectedAgenticAccount(BrokerValueModel):
+    """Explicit account selection made by a trusted, schema-specific adapter.
+
+    The opaque request context stays in memory, never in public snapshots. It
+    may contain the server's account selector, but is not an authorization.
+    """
+
+    account_fingerprint: str = Field(min_length=1)
+    agentic_allowed: bool = Field(strict=True)
+    request_context: dict[str, Any] = Field(default_factory=dict, repr=False)
+
+
+class RobinhoodAccountResponseAdapter(Protocol):
+    """Map verified get_accounts/get_portfolio schemas without guessing fields.
+
+    Implementations must select the user-designated Agentic account, preserve
+    explicit account/authentication evidence, and normalize a portfolio to the
+    canonical account fields required by ``_parse_account``. No implementation
+    is supplied until the authenticated server schemas have been verified.
+    """
+
+    @property
+    def expected_account_fingerprint(self) -> str: ...
+
+    def select_account(self, accounts_payload: Any) -> SelectedAgenticAccount: ...
+
+    def portfolio_arguments(
+        self, account: SelectedAgenticAccount, input_schema: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
+    def normalize_portfolio(
+        self, account: SelectedAgenticAccount, portfolio_payload: Any
+    ) -> Mapping[str, Any]: ...
+
+
 _TOOL_ALIASES: dict[str, tuple[str, ...]] = {
     "get_account_state": (
         "get_account_state",
@@ -117,7 +152,10 @@ _TOOL_ALIASES: dict[str, tuple[str, ...]] = {
     "cancel_option_order": ("cancel_option_order",),
 }
 
-_READ_CAPABILITIES = frozenset({"get_account_state", "get_positions", "get_orders"})
+_ACCOUNT_TOOLS = {"get_accounts": ("get_accounts",), "get_portfolio": ("get_portfolio",)}
+_READ_CAPABILITIES = frozenset(
+    {"get_account_state", "get_positions", "get_orders", *_ACCOUNT_TOOLS}
+)
 _WRITE_CAPABILITIES = frozenset(
     {BrokerAction.PLACE_OPTION_ORDER.value, BrokerAction.CANCEL_OPTION_ORDER.value}
 )
@@ -144,12 +182,21 @@ class RobinhoodReadOnlyMcpClient:
         environment: ExecutionEnvironment = ExecutionEnvironment.DEMO,
         safe_review_tools: frozenset[str] = frozenset({"review_option_order"}),
         expected_schema_hashes: Mapping[str, str] | None = None,
+        account_response_adapter: RobinhoodAccountResponseAdapter | None = None,
     ) -> None:
         self.__transport = transport
         self._clock = clock
         self._environment = environment
         self._safe_review_tools = safe_review_tools
         self._expected_schema_hashes = dict(expected_schema_hashes or {})
+        self._account_response_adapter = account_response_adapter
+        self._expected_account_fingerprint = (
+            account_response_adapter.expected_account_fingerprint
+            if account_response_adapter is not None
+            else None
+        )
+        self._selected_account_hash: str | None = None
+        self._uses_selected_account_flow = False
         self._capabilities: BrokerCapabilities | None = None
         self._tools_by_capability: dict[str, McpToolDefinition] = {}
 
@@ -166,14 +213,24 @@ class RobinhoodReadOnlyMcpClient:
         selected: dict[str, McpToolDefinition] = {}
         descriptors: list[CapabilityDescriptor] = []
         issues: list[str] = []
+        self._uses_selected_account_flow = self._account_response_adapter is not None or bool(
+            set(_ACCOUNT_TOOLS).intersection(by_name)
+        )
 
-        for capability, aliases in _TOOL_ALIASES.items():
+        for capability, aliases in (_TOOL_ALIASES | _ACCOUNT_TOOLS).items():
+            if capability == "get_account_state" and self._uses_selected_account_flow:
+                continue
             tool = next((by_name[name] for name in aliases if name in by_name), None)
             if tool is None:
-                issues.append(f"required Robinhood capability missing: {capability}")
+                if capability not in _ACCOUNT_TOOLS or self._uses_selected_account_flow:
+                    issues.append(f"required Robinhood capability missing: {capability}")
                 continue
             selected[capability] = tool
-            side_effect_free = capability in _READ_CAPABILITIES
+            side_effect_free = capability in _READ_CAPABILITIES and not bool(
+                tool.annotations.get("destructiveHint", False)
+            )
+            if capability in _READ_CAPABILITIES and not side_effect_free:
+                issues.append(f"read capability declares destructive effects: {capability}")
             if capability == "review_option_order":
                 side_effect_free = tool.name in self._safe_review_tools and not bool(
                     tool.annotations.get("destructiveHint", False)
@@ -197,13 +254,24 @@ class RobinhoodReadOnlyMcpClient:
 
         self._tools_by_capability = selected
         available = set(selected)
-        execution_requirements = set(_REQUIRED_CAPABILITIES)
+        account_ready = "get_account_state" in available
+        if self._uses_selected_account_flow:
+            account_ready = set(_ACCOUNT_TOOLS).issubset(available)
+            if self._account_response_adapter is None:
+                issues.append(
+                    "get_accounts/get_portfolio require an explicit selected-account adapter"
+                )
+                account_ready = False
+            elif not self._expected_account_fingerprint:
+                issues.append("selected-account adapter has no expected account fingerprint")
+                account_ready = False
+        execution_requirements = set(_REQUIRED_CAPABILITIES) - {"get_account_state"}
         self._capabilities = BrokerCapabilities(
             adapter_name="RobinhoodReadOnlyMcpClient",
             adapter_version=self.adapter_version,
             discovered_at=self._clock.now(),
             descriptors=tuple(descriptors),
-            account_state="get_account_state" in available,
+            account_state=account_ready,
             positions="get_positions" in available,
             orders="get_orders" in available,
             review_option_orders=(
@@ -220,12 +288,47 @@ class RobinhoodReadOnlyMcpClient:
             cancel_option_orders="cancel_option_order" in available,
             reconcile=True,
             external_writes_enabled=False,
-            execution_ready=execution_requirements.issubset(available) and not issues,
+            execution_ready=(
+                account_ready and execution_requirements.issubset(available) and not issues
+            ),
             issues=tuple(issues),
         )
         return self._capabilities
 
     async def get_account_state(self) -> AccountSnapshot:
+        await self.get_capabilities()
+        if self._uses_selected_account_flow:
+            adapter = self._account_response_adapter
+            if adapter is None:
+                raise SafetyCriticalError(
+                    "an explicit selected-account response adapter is required"
+                )
+            accounts = await self._call_allowed("get_accounts", {})
+            selection = adapter.select_account(_extract_payload(accounts))
+            if (
+                not isinstance(selection, SelectedAgenticAccount)
+                or selection.agentic_allowed is not True
+                or selection.account_fingerprint != self._expected_account_fingerprint
+            ):
+                raise SafetyCriticalError("selected account is not the expected Agentic account")
+            selection_hash = sha256_json(selection.model_dump(mode="json"))
+            if (
+                self._selected_account_hash is not None
+                and selection_hash != self._selected_account_hash
+            ):
+                raise SafetyCriticalError("selected Agentic account changed during this session")
+            capabilities = await self.get_capabilities()
+            descriptor = capabilities.descriptor_for("get_portfolio")
+            if descriptor is None:
+                raise SafetyCriticalError("selected-account portfolio capability is unavailable")
+            arguments = adapter.portfolio_arguments(selection, descriptor.input_schema)
+            portfolio = await self._call_allowed("get_portfolio", arguments)
+            normalized = adapter.normalize_portfolio(selection, _extract_payload(portfolio))
+            snapshot = _parse_account(normalized, clock=self._clock, environment=self._environment)
+            if snapshot.account_fingerprint != selection.account_fingerprint:
+                raise SafetyCriticalError("portfolio response belongs to a different account")
+            self._selected_account_hash = selection_hash
+            return snapshot
         payload = await self._call_allowed("get_account_state", {})
         return _parse_account(payload, clock=self._clock, environment=self._environment)
 
@@ -269,7 +372,11 @@ class RobinhoodReadOnlyMcpClient:
         if descriptor.tool_name in write_tool_names:
             raise SafetyCriticalError("write tool reached read-only MCP facade")
         try:
-            return await self.__transport.call_tool(descriptor.tool_name, dict(arguments))
+            result = await self.__transport.call_tool(
+                descriptor.tool_name, descriptor.validate(arguments)
+            )
+            _reject_error_result(result)
+            return result
         except (PermissionError, AuthenticationError) as exc:
             raise AuthenticationRequiredError("Robinhood MCP authentication is required") from exc
         except (TimeoutError, ConnectionError, OSError) as exc:
@@ -295,6 +402,7 @@ class RobinhoodMcpBroker(IntentRecordingBroker):
         command_recorder: CommandIntentRecorder | None = None,
         safe_review_tools: frozenset[str] = frozenset({"review_option_order"}),
         expected_schema_hashes: Mapping[str, str] | None = None,
+        account_response_adapter: RobinhoodAccountResponseAdapter | None = None,
     ) -> None:
         super().__init__(command_recorder=command_recorder)
         self._clock = clock
@@ -306,6 +414,7 @@ class RobinhoodMcpBroker(IntentRecordingBroker):
             environment=ExecutionEnvironment.LIVE,
             safe_review_tools=safe_review_tools,
             expected_schema_hashes=expected_schema_hashes,
+            account_response_adapter=account_response_adapter,
         )
         self._capabilities: BrokerCapabilities | None = None
         self._local_orders: dict[UUID, BrokerOrder] = {}
@@ -538,6 +647,13 @@ class AuthenticationError(Exception):
 
 
 def _normalize_tool_list(raw: Any) -> tuple[McpToolDefinition, ...]:
+    cursor = (
+        _first(raw, "nextCursor", "next_cursor")
+        if isinstance(raw, Mapping)
+        else getattr(raw, "next_cursor", getattr(raw, "nextCursor", None))
+    )
+    if cursor is not None:
+        raise DataInvalidError("MCP transport must exhaust tool-list pagination before discovery")
     if hasattr(raw, "tools"):
         raw = raw.tools
     elif isinstance(raw, Mapping) and "tools" in raw:
@@ -546,11 +662,15 @@ def _normalize_tool_list(raw: Any) -> tuple[McpToolDefinition, ...]:
         raise DataInvalidError("MCP list_tools response does not contain a tool sequence")
 
     tools: list[McpToolDefinition] = []
+    names: set[str] = set()
     for item in raw:
         mapping = _object_mapping(item)
         name = mapping.get("name")
         if not isinstance(name, str) or not name:
             raise DataInvalidError("MCP tool definition is missing its name")
+        if name in names:
+            raise DataInvalidError("MCP tool listing contains duplicate names")
+        names.add(name)
         schema_raw = mapping.get("inputSchema", mapping.get("input_schema", {}))
         if not isinstance(schema_raw, Mapping):
             raise DataInvalidError(f"MCP tool {name} has a non-object input schema")
@@ -594,9 +714,25 @@ def _object_mapping(value: Any) -> dict[str, Any]:
     raise DataInvalidError(f"expected object-like MCP value, got {type(value)!r}")
 
 
+def _reject_error_result(raw: Any) -> None:
+    flags = (
+        [raw[key] for key in ("isError", "is_error") if key in raw]
+        if isinstance(raw, Mapping)
+        else [getattr(raw, key) for key in ("isError", "is_error") if hasattr(raw, key)]
+    )
+    if any(flag is not None and type(flag) is not bool for flag in flags):
+        raise DataInvalidError("MCP result has an invalid error flag")
+    if any(flag is True for flag in flags):
+        # Broker error bodies can contain credentials or personal data.
+        raise DataInvalidError("MCP tool returned an error; result is not authoritative")
+    if isinstance(raw, Mapping) and raw.get("error"):
+        raise DataInvalidError("MCP result contains an error; result is not authoritative")
+
+
 def _extract_payload(raw: Any) -> Any:
     """Normalize SDK CallToolResult, JSON mappings, or text content."""
 
+    _reject_error_result(raw)
     if hasattr(raw, "structuredContent") and raw.structuredContent is not None:
         return raw.structuredContent
     if hasattr(raw, "structured_content") and raw.structured_content is not None:
@@ -607,7 +743,7 @@ def _extract_payload(raw: Any) -> Any:
         if raw.get("structured_content") is not None:
             return raw["structured_content"]
         # Plain mock transports commonly return the domain payload directly.
-        if "content" not in raw or len(raw) > 2:
+        if "content" not in raw:
             return raw
         content = raw.get("content")
     else:
@@ -640,10 +776,12 @@ def _unwrap_mapping(payload: Any, *keys: str) -> dict[str, Any]:
     for key in keys:
         nested = mapping.get(key)
         if isinstance(nested, Mapping):
+            _reject_error_result(nested)
             return dict(nested)
     for key in ("data", "result"):
         nested = mapping.get(key)
         if isinstance(nested, Mapping):
+            _reject_error_result(nested)
             return dict(nested)
     return mapping
 
@@ -655,7 +793,7 @@ def _unwrap_sequence(payload: Any, *keys: str) -> tuple[Any, ...]:
             nested = value.get(key)
             if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes, bytearray)):
                 return tuple(nested)
-        return ()
+        raise DataInvalidError("MCP result payload has no recognized collection")
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return tuple(value)
     raise DataInvalidError("MCP result payload does not contain a sequence")
@@ -716,29 +854,30 @@ def _parse_account(
 ) -> AccountSnapshot:
     data = _unwrap_mapping(payload, "account", "account_state", "profile")
     now = clock.now()
-    cash = _decimal_from(data, "cash", "cash_balance", "withdrawable_cash", default="0")
-    buying_power = _decimal_from(
+    cash = _required_decimal(data, "cash", "cash_balance", "withdrawable_cash")
+    buying_power = _required_decimal(
         data,
         "option_buying_power",
         "buying_power",
         "cash_available_for_withdrawal",
-        default=str(cash),
     )
     if cash < 0 or buying_power < 0:
         raise DataInvalidError("broker account returned negative cash/buying power")
     raw_account_id = _first(data, "account_fingerprint", "account_id", "account_number", "id")
     fingerprint: str | None
-    if raw_account_id is None:
-        fingerprint = None
+    if raw_account_id is None or not str(raw_account_id).strip():
+        raise DataInvalidError("broker account is missing its identity")
     elif "account_fingerprint" in data:
         fingerprint = str(raw_account_id)
     else:
         digest = hashlib.sha256(str(raw_account_id).encode()).hexdigest()
         fingerprint = f"sha256:{digest}"
-    as_of = _datetime_value(
-        _first(data, "as_of", "updated_at", "timestamp"),
-        default=now,
-    )
+    timestamp = _first(data, "as_of", "updated_at", "timestamp")
+    if timestamp is None:
+        raise DataInvalidError("broker account is missing its observation timestamp")
+    as_of = _datetime_value(timestamp, default=now)
+    if as_of > now:
+        raise DataInvalidError("broker account timestamp is in the future")
     return AccountSnapshot(
         created_at=now,
         environment=environment,
@@ -750,8 +889,8 @@ def _parse_account(
         open_positions=_int_from(data, "open_positions", "open_position_count", default=0),
         new_entries_today=_int_from(data, "new_entries_today", default=0),
         as_of=as_of,
-        is_authenticated=bool(data.get("is_authenticated", True)),
-        state_known=bool(data.get("state_known", True)),
+        is_authenticated=_explicit_bool(data, "is_authenticated"),
+        state_known=_explicit_bool(data, "state_known"),
     )
 
 
@@ -899,7 +1038,6 @@ def _parse_contract(data: Mapping[str, Any]) -> OptionContract:
 
 def _parse_review(payload: Any, *, proposal: TradeProposal, clock: Clock) -> BrokerReview:
     data = _unwrap_mapping(payload, "review", "order_review")
-    accepted_raw = _first(data, "accepted", "approved", "is_valid", "can_submit")
     alerts = data.get("warnings", data.get("alerts", ())) or ()
     warnings: tuple[str, ...]
     if isinstance(alerts, str):
@@ -911,7 +1049,7 @@ def _parse_review(payload: Any, *, proposal: TradeProposal, clock: Clock) -> Bro
         )
     else:
         warnings = (str(alerts),)
-    accepted = bool(accepted_raw) if accepted_raw is not None else not bool(data.get("error"))
+    accepted = _explicit_bool(data, "accepted", "approved", "is_valid", "can_submit")
     reference = _first(data, "review_id", "reference_id", "id")
     return BrokerReview(
         created_at=clock.now(),
@@ -994,9 +1132,28 @@ def _first(mapping: Mapping[str, Any], *keys: str) -> Any:
 
 def _to_decimal(value: Any) -> Decimal:
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise DataInvalidError(f"invalid broker decimal: {value!r}") from exc
+        raise DataInvalidError("invalid broker decimal") from exc
+    if not result.is_finite():
+        raise DataInvalidError("broker decimal must be finite")
+    return result
+
+
+def _required_decimal(mapping: Mapping[str, Any], *keys: str) -> Decimal:
+    value = _first(mapping, *keys)
+    if value is None:
+        raise DataInvalidError(f"broker account is missing required {keys[0]}")
+    return _to_decimal(value)
+
+
+def _explicit_bool(mapping: Mapping[str, Any], *keys: str) -> bool:
+    values = [mapping[key] for key in keys if key in mapping]
+    if not values or any(type(value) is not bool for value in values):
+        raise DataInvalidError(f"broker payload requires an explicit boolean {keys[0]}")
+    if any(value != values[0] for value in values):
+        raise DataInvalidError(f"broker payload has conflicting {keys[0]} evidence")
+    return bool(values[0])
 
 
 def _decimal_from(

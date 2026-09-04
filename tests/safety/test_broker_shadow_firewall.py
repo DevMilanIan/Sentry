@@ -69,7 +69,14 @@ class RecordingTransport:
         self.calls.append((name, arguments))
         if name == "get_account_state":
             # Nonzero funds deliberately prove that cash is not the write boundary.
-            return {"cash": "1000", "buying_power": "1000", "account_id": "secret"}
+            return {
+                "cash": "1000",
+                "buying_power": "1000",
+                "account_id": "secret",
+                "is_authenticated": True,
+                "state_known": True,
+                "as_of": NOW.isoformat(),
+            }
         if name in {"get_option_positions", "get_option_orders"}:
             return []
         if name == "review_option_order":

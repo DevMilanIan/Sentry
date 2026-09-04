@@ -362,8 +362,6 @@ class ExecutionService:
             idempotency_key=idempotency_key,
             action=BrokerAction.PLACE_OPTION_ORDER,
         )
-        await self._store.save_order_intent(intent)
-
         capabilities = await self._broker.get_capabilities()
         capability = capabilities.descriptor_for_action(BrokerAction.PLACE_OPTION_ORDER)
         if capability is None or not capabilities.execution_ready:
@@ -405,6 +403,7 @@ class ExecutionService:
             order_fingerprint=proposal.order_fingerprint,
             idempotency_key=idempotency_key,
         )
+        await self._store.save_order_intent(intent)
         await self._store.save_command_intent(command)
 
         pending = BrokerOrder(

@@ -97,6 +97,7 @@ class OfflineRuntime:
         self._initialized = False
         self._checkpoint_persisted = True
         self._journal_healthy = False
+        self._requires_reconciliation = True
         self.clock: VirtualClock
         self.broker: SimulatedBroker
         self.session: OfflineReplaySession
@@ -181,6 +182,7 @@ class OfflineRuntime:
                 and runtime.broker.state_persisted
                 and runtime._checkpoint_persisted
                 and runtime._journal_healthy
+                and not runtime._requires_reconciliation
                 and not view.unresolved_submission
                 and view.market_data_fresh
                 and not runtime.session.complete
@@ -266,6 +268,23 @@ class OfflineRuntime:
             if intent is not None and intent.action.value == "cancel_option_order":
                 continue
             if order.intent_id not in ledger_orders:
+                command = await self.store.get_command_for_order_intent(order.intent_id)
+                transitions = await self.store.list_transitions(order.intent_id)
+                if (
+                    order.state is OrderState.REJECTED
+                    and order.filled_quantity == 0
+                    and order.broker_order_id is None
+                    and intent is not None
+                    and command is not None
+                    and any(
+                        transition.previous is OrderState.SUBMITTING
+                        and transition.current is OrderState.REJECTED
+                        and transition.reason
+                        == ("local pre-submission gate denied; no broker write attempted")
+                        for transition in transitions
+                    )
+                ):
+                    continue
                 raise SafetyCriticalError("durable order is missing from the simulated ledger")
         for fill in state.fills:
             await self.store.save_fill(fill)
@@ -288,6 +307,7 @@ class OfflineRuntime:
 
     async def reconcile(self) -> bool:
         async with self._lock:
+            self._requires_reconciliation = True
             if not self.broker.state_persisted or not self._checkpoint_persisted:
                 if not await self.repository.healthcheck():
                     return False
@@ -302,6 +322,7 @@ class OfflineRuntime:
             if success and not self._initialized:
                 await self._persist_checkpoint(self.session.checkpoint)
                 self._initialized = True
+            self._requires_reconciliation = not success
             return success
 
     async def health(self) -> bool:
@@ -310,6 +331,7 @@ class OfflineRuntime:
             self._initialized
             and self._checkpoint_persisted
             and self._journal_healthy
+            and not self._requires_reconciliation
             and self.broker.state_persisted
             and not self.view.unresolved_submission
         )
@@ -332,7 +354,11 @@ class OfflineRuntime:
 
     async def step(self) -> None:
         async with self._lock:
-            if not self._initialized or not await self.repository.healthcheck():
+            if (
+                not self._initialized
+                or self._requires_reconciliation
+                or not await self.repository.healthcheck()
+            ):
                 raise SafetyCriticalError("replay requires initialized durable state")
             try:
                 await self.session.step()
@@ -340,6 +366,7 @@ class OfflineRuntime:
                 await self._propose_exits()
             except BaseException:
                 self._journal_healthy = False
+                self._requires_reconciliation = True
                 self.view.execution_service_healthy = False
                 self.view.reconciled = False
                 raise
@@ -401,12 +428,24 @@ class OfflineRuntime:
     async def dispatch_proposals(self) -> None:
         async with self._lock:
             try:
-                rows = await self.repository.list("trade_proposals", limit=500)
-                for row in rows:
-                    proposal = TradeProposal.model_validate(row["payload"])
-                    await self._dispatch(proposal)
+                cursor: int | None = None
+                for _ in range(200):
+                    rows = await self.repository.list_payloads(
+                        "trade_proposals", limit=500, before_sequence=cursor
+                    )
+                    for row in rows:
+                        proposal = TradeProposal.model_validate(row["payload"])
+                        await self._dispatch(proposal)
+                    if len(rows) < 500:
+                        break
+                    cursor = min(row["append_sequence"] for row in rows)
+                else:
+                    raise SafetyCriticalError(
+                        "proposal dispatch exceeded its complete-history bound"
+                    )
             except BaseException:
                 self._journal_healthy = False
+                self._requires_reconciliation = True
                 self.view.execution_service_healthy = False
                 self.view.reconciled = False
                 raise

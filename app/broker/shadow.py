@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -17,10 +19,17 @@ from app.broker.shadow_ledger import (
     DepositRecord,
     ExpirationPolicy,
     ExpirationResult,
+    LedgerSnapshot,
     ShadowLedger,
 )
 from app.clock.base import Clock
-from app.domain.enums import AccountKind, BrokerAction, ExecutionEnvironment, FirewallDisposition
+from app.domain.enums import (
+    AccountKind,
+    BrokerAction,
+    ExecutionEnvironment,
+    FirewallDisposition,
+    OrderState,
+)
 from app.domain.models import (
     AccountSnapshot,
     BrokerCommandIntent,
@@ -34,6 +43,11 @@ from app.domain.models import (
 )
 from app.exceptions import SafetyCriticalError, SentinelError
 from app.safety.write_firewall import DenyAllWriteFirewall
+
+ShadowLedgerStateRecorder = Callable[[LedgerSnapshot], Awaitable[None] | None]
+_TERMINAL_ORDER_STATES = frozenset(
+    {OrderState.FILLED, OrderState.CANCELED, OrderState.REJECTED, OrderState.EXPIRED}
+)
 
 
 class RobinhoodShadowBroker(IntentRecordingBroker):
@@ -60,17 +74,30 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         firewall: DenyAllWriteFirewall | None = None,
         command_recorder: CommandIntentRecorder | None = None,
         meaningful_external_balance: Decimal = Decimal("0"),
+        state_recorder: ShadowLedgerStateRecorder | None = None,
+        initial_state: LedgerSnapshot | None = None,
+        expected_account_fingerprint: str | None = None,
+        acknowledged_historical_order_ids: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(command_recorder=command_recorder)
         selected_firewall = firewall or DenyAllWriteFirewall(clock)
         if not isinstance(selected_firewall, DenyAllWriteFirewall):
             raise SafetyCriticalError("broker-shadow requires the deny-all write firewall")
-        if meaningful_external_balance < 0:
+        if not meaningful_external_balance.is_finite() or meaningful_external_balance < 0:
             raise ValueError("meaningful external balance threshold cannot be negative")
+        if expected_account_fingerprint is not None and not expected_account_fingerprint.strip():
+            raise ValueError("expected account fingerprint cannot be empty")
+        if any(not value.strip() for value in acknowledged_historical_order_ids):
+            raise ValueError("historical order IDs cannot be empty")
         self._clock = clock
+        self._namespace = namespace
         self._read_client = read_client
         self._firewall = selected_firewall
         self._meaningful_external_balance = meaningful_external_balance
+        self._state_recorder = state_recorder
+        self._state_dirty = False
+        self._expected_account_fingerprint = expected_account_fingerprint
+        self._historical_order_ids = frozenset(acknowledged_historical_order_ids)
         self._ledger = ShadowLedger(
             clock=clock,
             initial_cash=initial_cash,
@@ -79,6 +106,9 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
             max_quote_age=max_quote_age,
             namespace=namespace,
         )
+        if initial_state is not None:
+            self._ledger.restore_state(initial_state)
+            self._restore_commands(initial_state)
         self._lock = asyncio.Lock()
         self._capabilities: BrokerCapabilities | None = None
         self._last_broker_review: BrokerReview | None = None
@@ -87,6 +117,90 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
     @property
     def ledger(self) -> ShadowLedger:
         return self._ledger
+
+    @property
+    def state_persisted(self) -> bool:
+        return not self._state_dirty
+
+    def export_state(self) -> LedgerSnapshot:
+        return self._ledger.export_state(recorded_commands=self.recorded_command_intents)
+
+    async def flush_state(self) -> None:
+        async with self._lock:
+            await self._persist_state()
+
+    def _restore_commands(self, snapshot: LedgerSnapshot) -> None:
+        commands = {item.command_intent_id: item for item in snapshot.recorded_commands}
+        keys = {item.idempotency_key: item.command_intent_id for item in snapshot.recorded_commands}
+        if len(commands) != len(snapshot.recorded_commands) or len(keys) != len(commands):
+            raise SafetyCriticalError(
+                "restored shadow broker contains duplicate command identities"
+            )
+        for item in snapshot.orders:
+            recorded = commands.get(item.command.command_intent_id)
+            if recorded is None or recorded.command_hash != item.command.command_hash:
+                raise SafetyCriticalError("restored shadow order lacks its exact recorded command")
+            if (
+                snapshot.idempotency_order_ids.get(item.command.idempotency_key)
+                != item.published.order_id
+            ):
+                raise SafetyCriticalError("restored shadow placement idempotency target differs")
+        orders = {item.published.order_id: item for item in snapshot.orders}
+        for key, order_id in snapshot.idempotency_order_ids.items():
+            command_id = keys.get(key)
+            if command_id is None:
+                raise SafetyCriticalError(
+                    "restored shadow idempotency key lacks its recorded command"
+                )
+            command = commands[command_id]
+            target = orders[order_id]
+            if command.instrument_id != target.published.contract.instrument_id:
+                raise SafetyCriticalError(
+                    "restored shadow command references a different instrument"
+                )
+            if (
+                command.action is BrokerAction.PLACE_OPTION_ORDER
+                and command.command_hash != target.command.command_hash
+            ):
+                raise SafetyCriticalError(
+                    "restored shadow placement command differs from its order"
+                )
+        self._recorded_commands = commands
+        self._command_idempotency = keys
+
+    def _ensure_clean(self) -> None:
+        if self._state_dirty:
+            raise SafetyCriticalError("shadow ledger has an unpersisted mutation")
+
+    def _begin_mutation(self) -> None:
+        if self._state_recorder is not None:
+            self._state_dirty = True
+
+    async def _persist_state(self) -> None:
+        if self._state_recorder is None:
+            return
+        self._state_dirty = True
+        result = self._state_recorder(self.export_state())
+        if inspect.isawaitable(result):
+            await result
+        self._state_dirty = False
+
+    async def _deny_write(self, command: BrokerCommandIntent) -> None:
+        if (
+            command.environment is not ExecutionEnvironment.DEMO
+            or command.namespace != self._namespace
+        ):
+            raise SafetyCriticalError("shadow command does not match the immutable runtime binding")
+        if not self._firewall.healthcheck():
+            raise SafetyCriticalError("deny-all external write firewall is unhealthy")
+        decision = await self._firewall.evaluate(command)
+        if (
+            decision.transmitted
+            or decision.disposition is not FirewallDisposition.BLOCKED_SHADOW
+            or decision.command_intent_id != command.command_intent_id
+            or decision.environment is not ExecutionEnvironment.DEMO
+        ):
+            raise SafetyCriticalError("broker-shadow write firewall did not deny the exact command")
 
     @property
     def last_broker_observed_review(self) -> BrokerReview | None:
@@ -98,25 +212,35 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
 
     async def get_capabilities(self) -> BrokerCapabilities:
         discovered = await self._read_client.get_capabilities()
-        if self._capabilities is None:
-            issues = list(discovered.issues)
-            if not self._firewall.healthcheck():
-                issues.append("deny-all external write firewall is unhealthy")
-            self._capabilities = discovered.model_copy(
-                update={
-                    "adapter_name": "RobinhoodShadowBroker",
-                    "adapter_version": self.adapter_version,
-                    "external_writes_enabled": False,
-                    "execution_ready": discovered.execution_ready and not issues,
-                    "issues": tuple(issues),
-                }
-            )
+        issues = list(discovered.issues)
+        if not self._firewall.healthcheck():
+            issues.append("deny-all external write firewall is unhealthy")
+        if self._state_dirty:
+            issues.append("shadow ledger has an unpersisted mutation")
+        self._capabilities = discovered.model_copy(
+            update={
+                "adapter_name": "RobinhoodShadowBroker",
+                "adapter_version": self.adapter_version,
+                "external_writes_enabled": False,
+                "execution_ready": discovered.execution_ready and not issues,
+                "issues": tuple(issues),
+            }
+        )
         return self._capabilities
 
     async def get_observed_broker_account_state(self) -> AccountSnapshot:
         account = await self._read_client.get_account_state()
         if account.account_kind is not AccountKind.BROKER_OBSERVED:
             raise SafetyCriticalError("shadow read client returned a non-broker account")
+        if account.environment is not ExecutionEnvironment.DEMO:
+            raise SafetyCriticalError("shadow read client returned a non-DEMO account view")
+        if not account.account_fingerprint:
+            raise SafetyCriticalError("shadow read client returned an account without identity")
+        if (
+            self._expected_account_fingerprint is not None
+            and account.account_fingerprint != self._expected_account_fingerprint
+        ):
+            raise SafetyCriticalError("shadow read client returned a different selected account")
         return account
 
     async def get_effective_execution_account_state(self) -> AccountSnapshot:
@@ -142,7 +266,10 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         if proposal.environment is not ExecutionEnvironment.DEMO:
             raise SafetyCriticalError("broker-shadow received non-DEMO proposal")
         async with self._lock:
+            self._ensure_clean()
+            self._begin_mutation()
             shadow_review = self._ledger.review(proposal)
+            await self._persist_state()
             self._last_shadow_review = shadow_review
 
         broker_review: BrokerReview | None = None
@@ -187,12 +314,14 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         if command.action is not BrokerAction.PLACE_OPTION_ORDER:
             raise SafetyCriticalError("shadow placement received a non-placement command")
         await self._read_client.validate_command(command)
-        await self.record_broker_command_intent(command)
-        decision = await self._firewall.evaluate(command)
-        if decision.transmitted or decision.disposition is not FirewallDisposition.BLOCKED_SHADOW:
-            raise SafetyCriticalError("broker-shadow write firewall did not deny placement")
         async with self._lock:
-            return self._ledger.submit(command, contract)
+            self._ensure_clean()
+            await self._deny_write(command)
+            self._begin_mutation()
+            await self.record_broker_command_intent(command)
+            order = self._ledger.submit(command, contract)
+            await self._persist_state()
+            return order
 
     async def cancel_option_order(
         self,
@@ -202,16 +331,22 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         if command.action is not BrokerAction.CANCEL_OPTION_ORDER:
             raise SafetyCriticalError("shadow cancellation received a non-cancel command")
         await self._read_client.validate_command(command)
-        await self.record_broker_command_intent(command)
-        decision = await self._firewall.evaluate(command)
-        if decision.transmitted or decision.disposition is not FirewallDisposition.BLOCKED_SHADOW:
-            raise SafetyCriticalError("broker-shadow write firewall did not deny cancellation")
         async with self._lock:
-            return self._ledger.cancel(command, order_id)
+            self._ensure_clean()
+            await self._deny_write(command)
+            self._begin_mutation()
+            await self.record_broker_command_intent(command)
+            order = self._ledger.cancel(command, order_id)
+            await self._persist_state()
+            return order
 
     async def consume_quote(self, quote: OptionQuote) -> tuple[Fill, ...]:
         async with self._lock:
-            return self._ledger.observe_quote(quote)
+            self._ensure_clean()
+            self._begin_mutation()
+            fills = self._ledger.observe_quote(quote)
+            await self._persist_state()
+            return fills
 
     async def deposit(
         self,
@@ -220,7 +355,11 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         reference: str = "configured-shadow-scenario",
     ) -> DepositRecord:
         async with self._lock:
-            return self._ledger.deposit(amount, reference=reference)
+            self._ensure_clean()
+            self._begin_mutation()
+            deposit = self._ledger.deposit(amount, reference=reference)
+            await self._persist_state()
+            return deposit
 
     async def process_expirations(
         self,
@@ -230,11 +369,15 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         cash_settlement_per_share: dict[str, Decimal] | None = None,
     ) -> ExpirationResult:
         async with self._lock:
-            return self._ledger.expire(
+            self._ensure_clean()
+            self._begin_mutation()
+            result = self._ledger.expire(
                 on_date=on_date,
                 policy=policy,
                 cash_settlement_per_share=cash_settlement_per_share,
             )
+            await self._persist_state()
+            return result
 
     async def reconcile(self) -> ReconciliationReport:
         observed, observed_positions, observed_orders = await asyncio.gather(
@@ -245,6 +388,18 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
         async with self._lock:
             local = self._ledger.reconciliation_report()
             effective = local.effective_account
+            state_dirty = self._state_dirty
+        observed_active_orders = tuple(
+            order for order in observed_orders if order.state not in _TERMINAL_ORDER_STATES
+        )
+        historical_orders = tuple(
+            order for order in observed_orders if order.state in _TERMINAL_ORDER_STATES
+        )
+        unacknowledged_history = tuple(
+            order
+            for order in historical_orders
+            if order.broker_order_id not in self._historical_order_ids
+        )
         discrepancies = list(local.discrepancies)
         threshold = self._meaningful_external_balance
         if observed.cash > threshold:
@@ -253,8 +408,12 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
             discrepancies.append("unexpected real broker buying power during BROKER_SHADOW")
         if observed_positions:
             discrepancies.append("unexpected real broker option position during BROKER_SHADOW")
-        if observed_orders:
-            discrepancies.append("unexpected real broker option order during BROKER_SHADOW")
+        if observed_active_orders:
+            discrepancies.append("unexpected active real broker option order during BROKER_SHADOW")
+        if unacknowledged_history:
+            discrepancies.append("unacknowledged real broker order history during BROKER_SHADOW")
+        if state_dirty:
+            discrepancies.append("shadow ledger has an unpersisted mutation")
         if not observed.state_known:
             discrepancies.append("real broker account state is unknown")
         if not observed.is_authenticated:
@@ -277,6 +436,10 @@ class RobinhoodShadowBroker(IntentRecordingBroker):
                 "external_write_transport_present": False,
                 "observed_position_count": len(observed_positions),
                 "observed_order_count": len(observed_orders),
+                "observed_active_order_count": len(observed_active_orders),
+                "observed_historical_order_count": len(historical_orders),
+                "unacknowledged_historical_order_count": len(unacknowledged_history),
+                "shadow_state_persisted": not state_dirty,
                 "fill_model_version": self._ledger.fill_model.version,
             },
         )

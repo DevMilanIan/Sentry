@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from importlib import import_module
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
@@ -167,7 +168,13 @@ def test_metadata_has_ingestion_identity_and_filtered_execution_unique_indexes()
 def test_upgrade_covers_existing_schemas_without_deleting_audit_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    migration = import_module("migrations.versions.0002_durable_execution")
+    specification = spec_from_file_location(
+        "durable_execution_migration",
+        Path(__file__).parents[2] / "migrations" / "versions" / "0002_durable_execution.py",
+    )
+    assert specification is not None and specification.loader is not None
+    migration = module_from_spec(specification)
+    specification.loader.exec_module(migration)
     statements: list[str] = []
 
     class Connection:

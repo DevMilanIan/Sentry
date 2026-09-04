@@ -18,6 +18,7 @@ dependencies = [
   "mcp==2.1.1",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
+  "pywin32>=312; sys_platform == 'win32'",
   "PyYAML>=6.0,<7",
   "sqlalchemy[asyncio]>=2.0.36,<3",
   "structlog>=24.4,<26",
